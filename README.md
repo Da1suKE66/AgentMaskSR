@@ -38,6 +38,8 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2510.20668-b31b1b.svg)](https://arxiv.org/abs/2510.20668) [![GitHub](https://img.shields.io/badge/GitHub-Repo-181717?logo=github)](https://github.com/M-E-AGI-Lab/Awesome-World-Models)
 
+[![arXiv](https://img.shields.io/badge/arXiv-2602.01842-b31b1b.svg)](https://arxiv.org/abs/2602.01842) [![GitHub](https://img.shields.io/badge/GitHub-Repo-181717?logo=github)](https://github.com/viiika/Prism)
+
 </div>
 
 ## 📝 Meissonic Updates and Family Papers
@@ -64,6 +66,8 @@
 - [Reinforcement Learning Meets Masked Generative Models: Mask-GRPO for Text-to-Image Generation](https://arxiv.org/abs/2510.13418)
 - [MaskFocus: Focusing Policy Optimization on Critical Steps for Masked Image Generation](https://arxiv.org/abs/2512.18766)
 - [Co-GRPO: Co-Optimized Group Relative Policy Optimization for Masked Diffusion Model](https://arxiv.org/abs/2512.22288)
+- [Synergistic Multimodal Diffusion Transformer: Unifying and Enhancing Multimodal Generation via Adaptive Discrete Diffusion](https://www.preprints.org/frontend/manuscript/0aaaa5c92ad47499c4bfdcc229baf1d1/download_pub#page=2.28)
+- [🌟][Prism: Efficient Test-Time Scaling via Hierarchical Search and Self-Verification for Discrete Diffusion Language Models](https://arxiv.org/abs/2602.01842)
 
 - More papers are coming soon!
 See [MeissonFlow Research](https://huggingface.co/MeissonFlow) (Organization Card) for more about our vision.
