@@ -129,6 +129,8 @@ celerybeat.pid
 .env
 .venv
 env/
+envs/miniforge3/
+envs/*-py*/
 venv/
 ENV/
 env.bak/
@@ -157,6 +159,13 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# AgentMaskSR runtime artifacts
+.hf_cache/
+.mplconfig/
+outputs/
+artifacts/
+models/
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

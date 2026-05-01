@@ -1,5 +1,64 @@
 # Meissonic: Revitalizing Masked Generative Transformers for Efficient High-Resolution Text-to-Image Synthesis
 
+## AgentMaskSR Remote Safety Policy
+
+This fork is used for the AgentMaskSR research workflow on:
+
+```text
+lsh-temp:/home/ma-user/workspace/llc/AgentMaskSR
+```
+
+Remote code, logs, Markdown records, and generated experiment summaries must stay inside:
+
+```text
+/home/ma-user/workspace/llc/AgentMaskSR
+```
+
+The isolated conda runtime is the only allowed repository-external write target:
+
+```text
+/cache/llc/SR
+```
+
+Use `envs/agentsr_cache_env.sh` before running experiments. It sets the conda prefix, package caches, Hugging Face cache, and Matplotlib cache so runtime artifacts do not spill into unrelated paths.
+
+## AgentMaskSR Controller
+
+AgentMaskSR reframes Meissonic as a frozen masked token editor for super-resolution, detail refinement, and outpainting. The new controller does not train Meissonic. It builds a structured agent plan, creates a target-size observation image, chooses an adaptive mask over high-frequency or outpaint regions, and then optionally calls the existing Meissonic inpaint pipeline.
+
+Dry-run controller assets:
+
+```bash
+python tools/agent_mask_sr.py \
+  --input_image assets/inpaint/0eKR4M2uuL8.jpg \
+  --output_dir outputs/agent_mask_sr_dryrun \
+  --prompt "faithful super-resolution with clean texture detail" \
+  --mode sr \
+  --target_resolution 1024x1024 \
+  --alpha 0.40 \
+  --dry_run
+```
+
+Run Meissonic after model dependencies and checkpoints are available:
+
+```bash
+python tools/agent_mask_sr.py \
+  --input_image assets/inpaint/0eKR4M2uuL8.jpg \
+  --output_dir outputs/agent_mask_sr_run \
+  --prompt "faithful super-resolution with clean texture detail" \
+  --mode sr \
+  --target_resolution 1024x1024 \
+  --alpha 0.40 \
+  --run_meissonic
+```
+
+The generated controller files are:
+
+- `agent_plan.json`: structured agent plan.
+- `init_observation.png`: bicubic or outpaint initialization.
+- `mask_refine.png`: Meissonic-compatible white repaint / black preserve mask.
+- `controller_metrics.json`: mask ratio, tile grid, and LR downsample consistency.
+
 <div align="center">
 <img width="1421" alt="Meissonic Banner" src="https://github.com/user-attachments/assets/703f6882-163a-42d0-8da8-3680231ca75e">
 
