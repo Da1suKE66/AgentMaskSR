@@ -83,3 +83,69 @@ Dry-run result:
 masked_pixel_ratio = 0.315521240234375
 psnr_downsample_vs_lr = 29.643259832940526
 ```
+
+## v0.3.0-full-pipeline-smoke - 2026-05-01
+
+### Scope
+
+Install Meissonic inference dependencies, download Hugging Face weights, and run the complete AgentMaskSR pipeline once.
+
+### Runtime
+
+Conda environment:
+
+```text
+/cache/llc/SR
+```
+
+Key packages:
+
+```text
+torch 2.8.0+cu128
+torchvision 0.23.0
+transformers 4.56.2
+diffusers 0.35.1
+accelerate 1.10.1
+```
+
+Weights cache:
+
+```text
+/home/ma-user/workspace/llc/AgentMaskSR/.hf_cache
+```
+
+### Code Fixes
+
+- Explicit `--mode` now has priority over instruction keyword inference.
+- `tools/agent_mask_sr.py` defaults to `--dtype float32`.
+- `--dtype auto|float32|float16|bfloat16` is available for later speed/quality testing.
+
+### First Complete Output
+
+Command:
+
+```bash
+python tools/agent_mask_sr.py --input_image assets/inpaint/0eKR4M2uuL8.jpg --output_dir outputs/first_pipeline_run_1024_fp32 --prompt "faithful super-resolution with clean texture detail" --mode sr --target_resolution 1024x1024 --alpha 0.35 --run_meissonic --steps 4 --guidance_scale 7.0 --seed 66 --dtype float32
+```
+
+Generated image:
+
+```text
+outputs/first_pipeline_run_1024_fp32/meissonic_refined.png
+```
+
+Validation:
+
+```text
+image size = 1024x1024
+RGB mean = [115.91, 110.99, 96.93]
+RGB extrema = [(0, 255), (0, 249), (0, 255)]
+```
+
+Current limitation:
+
+```text
+psnr_downsample_vs_lr after refinement = 16.436645479455237 dB
+```
+
+The pipeline runs end to end, but stronger observation consistency is needed next.

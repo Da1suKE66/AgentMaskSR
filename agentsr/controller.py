@@ -90,11 +90,14 @@ def derive_agent_plan(
     """
 
     text = instruction.lower()
-    inferred_mode = mode or "sr"
-    if any(word in text for word in ("outpaint", "expand", "extend", "扩图", "外扩")):
+    if mode is not None:
+        inferred_mode = mode
+    elif any(word in text for word in ("outpaint", "expand", "extend", "扩图", "外扩")):
         inferred_mode = "sr_outpaint" if any(word in text for word in ("sr", "super", "超分")) else "outpaint"
     elif any(word in text for word in ("detail", "texture", "细节", "增强")):
         inferred_mode = "detail"
+    else:
+        inferred_mode = "sr"
 
     if alpha is None:
         if inferred_mode == "sr":

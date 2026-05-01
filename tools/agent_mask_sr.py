@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=64)
     parser.add_argument("--guidance_scale", type=float, default=9.0)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--dtype", choices=["auto", "float32", "float16", "bfloat16"], default="float32")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--negative_prompt", default=DEFAULT_NEGATIVE_PROMPT)
     return parser.parse_args()
@@ -58,7 +59,7 @@ def ensure_repo_local(path: Path) -> Path:
     return resolved
 
 
-def load_meissonic_pipeline(model_path: str, device: str):
+def load_meissonic_pipeline(model_path: str, device: str, dtype: str = "float32"):
     import torch
     from diffusers import VQModel
     from transformers import CLIPTextModelWithProjection, CLIPTokenizer
@@ -73,10 +74,16 @@ def load_meissonic_pipeline(model_path: str, device: str):
     tokenizer = CLIPTokenizer.from_pretrained(model_path, subfolder="tokenizer")
     scheduler = Scheduler.from_pretrained(model_path, subfolder="scheduler")
 
-    dtype = torch.float16 if device.startswith("cuda") else torch.float32
-    model = model.to(dtype=dtype)
-    vq_model = vq_model.to(dtype=dtype)
-    text_encoder = text_encoder.to(dtype=dtype)
+    dtype_map = {
+        "auto": torch.float16 if device.startswith("cuda") else torch.float32,
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    target_dtype = dtype_map[dtype]
+    model = model.to(dtype=target_dtype)
+    vq_model = vq_model.to(dtype=target_dtype)
+    text_encoder = text_encoder.to(dtype=target_dtype)
 
     pipe = InpaintPipeline(
         vq_model,
@@ -96,7 +103,7 @@ def run_meissonic(args: argparse.Namespace, assets: dict, output_dir: Path) -> P
     if args.seed is not None:
         generator = torch.Generator(device=args.device if args.device.startswith("cuda") else "cpu").manual_seed(args.seed)
 
-    pipe = load_meissonic_pipeline(args.model_path, args.device)
+    pipe = load_meissonic_pipeline(args.model_path, args.device, dtype=args.dtype)
     result = pipe(
         prompt=plan.prompt,
         negative_prompt=args.negative_prompt,

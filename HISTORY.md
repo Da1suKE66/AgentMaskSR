@@ -100,3 +100,38 @@ Validation commands completed on `lsh-temp`:
 python -m py_compile agentsr/controller.py tools/agent_mask_sr.py
 python tools/agent_mask_sr.py --input_image assets/inpaint/0eKR4M2uuL8.jpg --output_dir outputs/smoke_controller --prompt "faithful super-resolution" --mode sr --target_resolution 512x512 --dry_run
 ```
+
+## 2026-05-01 Full Pipeline Runtime
+
+Installed Meissonic inference dependencies into:
+
+```text
+/cache/llc/SR
+```
+
+Important runtime packages:
+
+```text
+torch 2.8.0+cu128
+torchvision 0.23.0
+transformers 4.56.2
+diffusers 0.35.1
+accelerate 1.10.1
+```
+
+Downloaded Hugging Face weights into:
+
+```text
+/home/ma-user/workspace/llc/AgentMaskSR/.hf_cache
+```
+
+Fixes made while running the full pipeline:
+
+- `derive_agent_plan` now respects an explicit `--mode` instead of allowing prompt keywords such as `detail` to override it.
+- `tools/agent_mask_sr.py` now exposes `--dtype` and defaults to `float32`, matching the official Meissonic scripts. The earlier fp16 wrapper produced an all-black decoded image.
+
+Successful full output:
+
+```text
+outputs/first_pipeline_run_1024_fp32/meissonic_refined.png
+```
