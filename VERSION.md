@@ -149,3 +149,58 @@ psnr_downsample_vs_lr after refinement = 16.436645479455237 dB
 ```
 
 The pipeline runs end to end, but stronger observation consistency is needed next.
+
+## v0.4.0-observation-projection - 2026-05-01
+
+### Scope
+
+Add a stronger training-free LR observation consistency step after Meissonic refinement.
+
+### Implementation
+
+New function:
+
+```text
+agentsr.controller.observation_consistency_project
+```
+
+New CLI controls:
+
+```text
+--skip_consistency_projection
+--consistency_steps
+--consistency_strength
+--edit_strength
+--mask_blur_radius
+```
+
+Default SR settings:
+
+```text
+consistency_steps = 2
+projection_lr_weight = 0.5
+edit_strength = 0.80 + 0.20 * alpha
+```
+
+### Output
+
+```text
+outputs/first_pipeline_run_1024_consistency/meissonic_consistent.png
+outputs/first_pipeline_run_1024_consistency/consistency_projection_metrics.json
+```
+
+### Result
+
+```text
+before projection PSNR = 16.436645479455237 dB
+after projection PSNR = 27.32617890889089 dB
+PSNR gain = 10.889533429435652 dB
+```
+
+The projected output is not a pure copy of the bicubic initialization:
+
+```text
+mean_abs(meissonic_consistent - init_observation) = [3.42, 3.41, 3.49]
+```
+
+This is now a usable training-free observation consistency baseline. The remaining research upgrade is to move the same score into token-level candidate acceptance.

@@ -247,6 +247,83 @@ def downsample_consistency_metrics(candidate: Image.Image, observation: Image.Im
     return {"mse_downsample_vs_lr": mse, "psnr_downsample_vs_lr": psnr}
 
 
+def _rgb_float(image: Image.Image, size: Optional[Tuple[int, int]] = None) -> np.ndarray:
+    if size is not None and image.size != size:
+        image = image.resize(size, Image.Resampling.BICUBIC)
+    return np.asarray(image.convert("RGB"), dtype=np.float32)
+
+
+def _float_rgb_image(arr: np.ndarray) -> Image.Image:
+    return Image.fromarray(np.uint8(np.clip(arr, 0, 255).round()), mode="RGB")
+
+
+def _soft_mask(mask_image: Image.Image, size: Tuple[int, int], blur_radius: float) -> np.ndarray:
+    mask = mask_image.convert("L").resize(size, Image.Resampling.BICUBIC)
+    if blur_radius > 0:
+        mask = mask.filter(ImageFilter.GaussianBlur(blur_radius))
+    arr = np.asarray(mask, dtype=np.float32) / 255.0
+    return np.clip(arr[..., None], 0.0, 1.0)
+
+
+def observation_consistency_project(
+    candidate: Image.Image,
+    observation: Image.Image,
+    init_image: Image.Image,
+    mask_image: Optional[Image.Image] = None,
+    lr_weight: float = 0.85,
+    edit_strength: float = 0.60,
+    num_steps: int = 3,
+    mask_blur_radius: float = 6.0,
+) -> Tuple[Image.Image, Dict[str, float]]:
+    """Project an edited image back toward the LR observation.
+
+    This is a pixel-space proxy for observation-constrained token refinement:
+
+    1. Downsample the current HR candidate to the LR observation size.
+    2. Compute the low-frequency residual against the LR observation.
+    3. Upsample that residual and subtract it from the HR candidate.
+    4. Re-apply the controller mask so unmasked/protected regions stay close to
+       the bicubic observation initialization.
+
+    The function is intentionally deterministic and training-free.
+    """
+
+    target_size = init_image.size
+    observation = observation.convert("RGB")
+    current = _rgb_float(candidate, target_size)
+    init_arr = _rgb_float(init_image, target_size)
+    obs_arr = _rgb_float(observation)
+
+    before = downsample_consistency_metrics(_float_rgb_image(current), observation)
+    lr_weight = float(np.clip(lr_weight, 0.0, 1.0))
+    edit_strength = float(np.clip(edit_strength, 0.0, 1.0))
+
+    for _ in range(max(0, int(num_steps))):
+        down = _float_rgb_image(current).resize(observation.size, Image.Resampling.BICUBIC)
+        residual = _rgb_float(down) - obs_arr
+        residual_up = _rgb_float(_float_rgb_image(residual + 127.5).resize(target_size, Image.Resampling.BICUBIC)) - 127.5
+        current = np.clip(current - lr_weight * residual_up, 0, 255)
+
+    if mask_image is not None:
+        allowed = _soft_mask(mask_image, target_size, mask_blur_radius) * edit_strength
+        current = init_arr * (1.0 - allowed) + current * allowed
+
+    projected = _float_rgb_image(current)
+    after = downsample_consistency_metrics(projected, observation)
+    diagnostics = {
+        "projection_steps": int(num_steps),
+        "projection_lr_weight": lr_weight,
+        "projection_edit_strength": edit_strength,
+        "projection_mask_blur_radius": float(mask_blur_radius),
+        "before_mse_downsample_vs_lr": before["mse_downsample_vs_lr"],
+        "before_psnr_downsample_vs_lr": before["psnr_downsample_vs_lr"],
+        "after_mse_downsample_vs_lr": after["mse_downsample_vs_lr"],
+        "after_psnr_downsample_vs_lr": after["psnr_downsample_vs_lr"],
+        "psnr_gain_db": after["psnr_downsample_vs_lr"] - before["psnr_downsample_vs_lr"],
+    }
+    return projected, diagnostics
+
+
 def tile_grid(
     target_size: Tuple[int, int],
     tile_size: int = 1024,

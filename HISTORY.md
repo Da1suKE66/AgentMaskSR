@@ -135,3 +135,36 @@ Successful full output:
 ```text
 outputs/first_pipeline_run_1024_fp32/meissonic_refined.png
 ```
+
+## 2026-05-01 Stronger Observation Consistency
+
+Added:
+
+- `observation_consistency_project` in `agentsr/controller.py`.
+- CLI options in `tools/agent_mask_sr.py`:
+  - `--skip_consistency_projection`
+  - `--consistency_steps`
+  - `--consistency_strength`
+  - `--edit_strength`
+  - `--mask_blur_radius`
+
+Default SR behavior now applies a pixel-space observation projection after Meissonic refinement:
+
+```text
+meissonic_refined.png -> meissonic_consistent.png
+```
+
+The projection compares the generated HR image downsampled to LR against the original input image, upsamples the residual, corrects the HR candidate, and then re-blends with `init_observation.png` according to `mask_refine.png`.
+
+Validation output:
+
+```text
+outputs/first_pipeline_run_1024_consistency/meissonic_consistent.png
+```
+
+Measured improvement:
+
+```text
+PSNR before projection = 16.436645479455237 dB
+PSNR after projection = 27.32617890889089 dB
+```

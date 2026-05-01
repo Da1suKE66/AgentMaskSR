@@ -204,3 +204,78 @@ psnr_downsample_vs_lr = 16.436645479455237
 Interpretation:
 
 The first complete pipeline is now operational and produces a non-empty image. The low PSNR after Meissonic refinement shows the next research step clearly: add stronger observation-consistency scoring or token-level rejection so Meissonic's visual prior cannot drift too far from the LR observation.
+
+## 2026-05-01 Observation Consistency Projection
+
+Status:
+
+```text
+completed
+```
+
+Added a deterministic post-refinement projection in `agentsr/controller.py`:
+
+1. Downsample the HR Meissonic candidate to the original LR size.
+2. Compute the low-frequency residual against the LR observation.
+3. Upsample the residual to HR and subtract it from the candidate.
+4. Re-apply the controller mask so protected black-mask regions move back toward `init_observation.png`.
+
+New output files:
+
+```text
+outputs/first_pipeline_run_1024_consistency/meissonic_consistent.png
+outputs/first_pipeline_run_1024_consistency/consistency_projection_metrics.json
+```
+
+Successful integrated command:
+
+```bash
+python tools/agent_mask_sr.py \
+  --input_image assets/inpaint/0eKR4M2uuL8.jpg \
+  --output_dir outputs/first_pipeline_run_1024_consistency \
+  --prompt "faithful super-resolution with clean texture detail" \
+  --mode sr \
+  --target_resolution 1024x1024 \
+  --alpha 0.35 \
+  --run_meissonic \
+  --steps 4 \
+  --guidance_scale 7.0 \
+  --seed 66 \
+  --dtype float32
+```
+
+Projection parameters:
+
+```text
+projection_steps = 2
+projection_lr_weight = 0.5
+projection_edit_strength = 0.87
+projection_mask_blur_radius = 6.0
+```
+
+Metrics before projection:
+
+```text
+mse_downsample_vs_lr = 1477.1201171875
+psnr_downsample_vs_lr = 16.436645479455237
+```
+
+Metrics after projection:
+
+```text
+mse_downsample_vs_lr = 120.35453796386719
+psnr_downsample_vs_lr = 27.32617890889089
+psnr_gain_db = 10.889533429435652
+```
+
+Non-copy check:
+
+```text
+mean_abs(meissonic_refined - init_observation) = [18.69, 18.47, 19.02]
+mean_abs(meissonic_consistent - init_observation) = [3.42, 3.41, 3.49]
+mean_abs(meissonic_consistent - meissonic_refined) = [15.27, 15.07, 15.53]
+```
+
+Interpretation:
+
+The projection strongly improves LR consistency while retaining a controlled amount of Meissonic edit signal. It is still pixel-space, not token-level rejection, so the next method step is to move this residual score into candidate token acceptance or scheduler callbacks.

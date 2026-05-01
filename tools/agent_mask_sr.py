@@ -21,6 +21,7 @@ from agentsr.controller import (  # noqa: E402
     derive_agent_plan,
     downsample_consistency_metrics,
     load_plan,
+    observation_consistency_project,
 )
 
 
@@ -46,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance_scale", type=float, default=9.0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", choices=["auto", "float32", "float16", "bfloat16"], default="float32")
+    parser.add_argument("--skip_consistency_projection", action="store_true")
+    parser.add_argument("--consistency_steps", type=int, default=2)
+    parser.add_argument("--consistency_strength", type=float, default=None)
+    parser.add_argument("--edit_strength", type=float, default=None)
+    parser.add_argument("--mask_blur_radius", type=float, default=6.0)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--negative_prompt", default=DEFAULT_NEGATIVE_PROMPT)
     return parser.parse_args()
@@ -95,7 +101,7 @@ def load_meissonic_pipeline(model_path: str, device: str, dtype: str = "float32"
     return pipe.to(device)
 
 
-def run_meissonic(args: argparse.Namespace, assets: dict, output_dir: Path) -> Path:
+def run_meissonic(args: argparse.Namespace, assets: dict, output_dir: Path) -> dict:
     import torch
 
     plan = assets["plan"]
@@ -117,13 +123,48 @@ def run_meissonic(args: argparse.Namespace, assets: dict, output_dir: Path) -> P
 
     output_path = output_dir / "meissonic_refined.png"
     result.save(output_path)
+    outputs = {"refined_image": str(output_path)}
 
     metrics = downsample_consistency_metrics(result, Image.open(args.input_image).convert("RGB"))
     metrics_path = output_dir / "meissonic_metrics.json"
     with metrics_path.open("w", encoding="utf-8") as handle:
         json.dump(metrics, handle, indent=2, ensure_ascii=False)
         handle.write("\n")
-    return output_path
+
+    if not args.skip_consistency_projection:
+        observation = Image.open(args.input_image).convert("RGB")
+        lr_weight = args.consistency_strength
+        if lr_weight is None:
+            lr_weight = min(plan.lr_consistency_weight, 0.50) if plan.mode == "sr" else plan.lr_consistency_weight
+        edit_strength = args.edit_strength
+        if edit_strength is None:
+            if plan.mode == "sr":
+                edit_strength = 0.80 + 0.20 * plan.alpha
+            elif plan.mode == "detail":
+                edit_strength = 0.75 + 0.20 * plan.alpha
+            else:
+                edit_strength = 0.60 + 0.35 * plan.alpha
+
+        consistent, projection_metrics = observation_consistency_project(
+            result,
+            observation=observation,
+            init_image=assets["init_image"],
+            mask_image=assets["mask_image"],
+            lr_weight=lr_weight,
+            edit_strength=edit_strength,
+            num_steps=args.consistency_steps,
+            mask_blur_radius=args.mask_blur_radius,
+        )
+        consistent_path = output_dir / "meissonic_consistent.png"
+        consistent.save(consistent_path)
+        projection_path = output_dir / "consistency_projection_metrics.json"
+        with projection_path.open("w", encoding="utf-8") as handle:
+            json.dump(projection_metrics, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        outputs["consistent_image"] = str(consistent_path)
+        outputs["consistency_projection_metrics"] = str(projection_path)
+
+    return outputs
 
 
 def main() -> int:
@@ -161,7 +202,7 @@ def main() -> int:
     }
 
     if args.run_meissonic and not args.dry_run:
-        summary["refined_image"] = str(run_meissonic(args, assets, output_dir))
+        summary.update(run_meissonic(args, assets, output_dir))
 
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0
