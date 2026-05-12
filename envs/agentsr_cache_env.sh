@@ -9,6 +9,8 @@ export HF_HOME="/cache/llc/SR-hf-cache"
 export TRANSFORMERS_CACHE="/cache/llc/SR-hf-cache/hub"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
 export MPLCONFIGDIR="/cache/llc/SR-mplconfig"
+export AGENTMASKSR_CODEX_PREFIX="/cache/llc/codex-cli"
+export PATH="${AGENTMASKSR_CODEX_PREFIX}/npm-global/bin:${AGENTMASKSR_CODEX_PREFIX}/node/bin:${PATH}"
 export PYTHONNOUSERSITE=1
 
 cd "${AGENTMASKSR_ROOT}"

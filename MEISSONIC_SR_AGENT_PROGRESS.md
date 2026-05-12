@@ -339,3 +339,15 @@ Policy going forward:
 - Push after each meaningful implementation or experiment checkpoint.
 - Keep large outputs and HF/model cache out of git; only code, configs, and markdown progress records should be committed.
 
+## 2026-05-13 Codex CLI Install on lsh-stable
+
+Status: completed.
+
+- Installed Node.js under /cache/llc/codex-cli/node.
+- Installed Codex CLI through npm under /cache/llc/codex-cli/npm-global.
+- Verified versions: Node v22.22.2, npm 10.9.7, codex-cli 0.130.0.
+- envs/agentsr_cache_env.sh now prepends the Codex CLI and Node.js bins to PATH through AGENTMASKSR_CODEX_PREFIX.
+
+Usage:
+
+- Run `source envs/agentsr_cache_env.sh` from AgentSR, then `codex --version`.
