@@ -29,6 +29,14 @@ DEFAULT_NEGATIVE_PROMPT = (
     "signature, text artifacts, jpeg artifacts, duplicate, ugly"
 )
 
+MASK_STRATEGIES = (
+    "frequency",
+    "edge",
+    "variance",
+    "hybrid",
+    "uncage",
+)
+
 
 @dataclass
 class AgentPlan:
@@ -43,7 +51,7 @@ class AgentPlan:
     lr_consistency_weight: float = 0.85
     boundary_consistency_weight: float = 0.70
     temperature: float = 0.45
-    mask_policy: str = "frequency_entropy_attention"
+    mask_policy: str = "uncage"
     prompt: str = (
         "restore faithful high-frequency details while preserving the low-resolution observation"
     )
@@ -160,19 +168,158 @@ def _box_blur(arr: np.ndarray, radius: int) -> np.ndarray:
     return np.asarray(img.filter(ImageFilter.BoxBlur(radius)), dtype=np.float32) / 255.0
 
 
-def frequency_entropy_map(image: Image.Image) -> np.ndarray:
-    """Compute a normalized detail map from gradients and local variance."""
+def detail_evidence_maps(image: Image.Image) -> Dict[str, np.ndarray]:
+    """Compute deterministic evidence maps used by mask strategies."""
 
     gray = np.asarray(ImageOps.grayscale(image), dtype=np.float32) / 255.0
     gy, gx = np.gradient(gray)
-    gradient = np.sqrt(gx * gx + gy * gy)
+    gradient = _normalize_array(np.sqrt(gx * gx + gy * gy))
 
     local_mean = _box_blur(gray, radius=4)
     local_sq_mean = _box_blur(gray * gray, radius=4)
-    variance = np.maximum(local_sq_mean - local_mean * local_mean, 0.0)
+    variance = _normalize_array(np.maximum(local_sq_mean - local_mean * local_mean, 0.0))
 
-    detail = 0.65 * _normalize_array(gradient) + 0.35 * _normalize_array(variance)
-    return _normalize_array(detail)
+    frequency = _normalize_array(0.65 * gradient + 0.35 * variance)
+    texture = _normalize_array(0.25 * gradient + 0.75 * variance)
+    flatness = _normalize_array(1.0 - frequency)
+    return {
+        "gray": gray,
+        "gradient": gradient,
+        "variance": variance,
+        "frequency": frequency,
+        "texture": texture,
+        "flatness": flatness,
+    }
+
+
+def frequency_entropy_map(image: Image.Image) -> np.ndarray:
+    """Compute a normalized detail map from gradients and local variance."""
+
+    return detail_evidence_maps(image)["frequency"]
+
+
+def mask_budget_for_plan(plan: AgentPlan) -> float:
+    """Return the target pixel mask budget before token-grid quantization."""
+
+    alpha = float(np.clip(plan.alpha, 0.0, 1.0))
+    if plan.mode == "sr":
+        return 0.06 + 0.18 * alpha
+    if plan.mode == "detail":
+        return 0.16 + 0.36 * alpha
+    if plan.mode == "outpaint":
+        return 0.04 + 0.16 * alpha
+    return 0.14 + 0.36 * alpha
+
+
+def _deterministic_blue_noise(shape: Tuple[int, int]) -> np.ndarray:
+    """Cheap deterministic hash field used for sparse uncage sampling."""
+
+    height, width = shape
+    yy, xx = np.mgrid[:height, :width]
+    hashed = np.sin((xx + 0.5) * 12.9898 + (yy + 0.5) * 78.233) * 43758.5453
+    return (hashed - np.floor(hashed)).astype(np.float32)
+
+
+def mask_score_map(init_image: Image.Image, strategy: str) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """Return a normalized score map for a named mask strategy."""
+
+    strategy = normalize_mask_strategy(strategy)
+    maps = detail_evidence_maps(init_image)
+    gradient = maps["gradient"]
+    variance = maps["variance"]
+    frequency = maps["frequency"]
+    blue = _deterministic_blue_noise(frequency.shape)
+
+    if strategy == "frequency":
+        score = frequency
+    elif strategy == "edge":
+        score = gradient
+    elif strategy == "variance":
+        score = variance
+    elif strategy == "hybrid":
+        score = 0.50 * frequency + 0.30 * variance + 0.15 * gradient + 0.05 * blue
+    elif strategy == "uncage":
+        # Uncage keeps the strongest structure lines as a cage while releasing
+        # sparse texture/detail islands around them. This avoids large connected
+        # redraw areas in conservative SR.
+        strong_edge = gradient >= np.quantile(gradient, 0.92)
+        score = 0.45 * variance + 0.35 * frequency + 0.20 * blue
+        score = np.where(strong_edge & (variance < np.quantile(variance, 0.70)), score * 0.35, score)
+    else:
+        raise ValueError(f"unknown mask strategy: {strategy}")
+    return _normalize_array(score), maps
+
+
+def normalize_mask_strategy(strategy: Optional[str]) -> str:
+    if not strategy:
+        return "uncage"
+    clean = strategy.lower().strip().replace("-", "_")
+    aliases = {
+        "frequency_entropy_attention": "frequency",
+        "freq": "frequency",
+        "edges": "edge",
+        "edge_only": "edge",
+        "texture": "variance",
+        "local_variance": "variance",
+        "mixed": "hybrid",
+        "blue_noise": "uncage",
+        "uncaged": "uncage",
+    }
+    clean = aliases.get(clean, clean)
+    if clean not in MASK_STRATEGIES:
+        raise ValueError(f"mask strategy must be one of {', '.join(MASK_STRATEGIES)}, got {strategy!r}")
+    return clean
+
+
+def _threshold_by_budget(score: np.ndarray, budget: float) -> np.ndarray:
+    budget = float(np.clip(budget, 0.0, 1.0))
+    if budget <= 0.0:
+        return np.zeros(score.shape, dtype=bool)
+    if budget >= 1.0:
+        return np.ones(score.shape, dtype=bool)
+    threshold = float(np.quantile(score, max(0.0, 1.0 - budget)))
+    return score >= threshold
+
+
+def mask_quality_diagnostics(
+    mask: np.ndarray,
+    score: np.ndarray,
+    maps: Mapping[str, np.ndarray],
+    budget: float,
+    strategy: str,
+) -> Dict[str, float | str]:
+    active = mask.astype(bool)
+    if not bool(active.any()):
+        return {
+            "mask_strategy": strategy,
+            "mask_budget": float(budget),
+            "mask_score_mean_active": 0.0,
+            "mask_score_mean_frozen": float(score.mean()),
+            "detail_coverage_top25": 0.0,
+            "edge_coverage_top10": 0.0,
+            "texture_coverage_top25": 0.0,
+            "flat_leakage_bottom25": 0.0,
+        }
+
+    frequency = maps["frequency"]
+    gradient = maps["gradient"]
+    variance = maps["variance"]
+    flatness = maps["flatness"]
+    high_detail = frequency >= np.quantile(frequency, 0.75)
+    strong_edge = gradient >= np.quantile(gradient, 0.90)
+    high_texture = variance >= np.quantile(variance, 0.75)
+    flat = flatness >= np.quantile(flatness, 0.75)
+    frozen = ~active
+    return {
+        "mask_strategy": strategy,
+        "mask_budget": float(budget),
+        "mask_score_mean_active": float(score[active].mean()),
+        "mask_score_mean_frozen": float(score[frozen].mean()) if bool(frozen.any()) else 0.0,
+        "detail_coverage_top25": float(np.logical_and(active, high_detail).sum() / max(1, int(high_detail.sum()))),
+        "edge_coverage_top10": float(np.logical_and(active, strong_edge).sum() / max(1, int(strong_edge.sum()))),
+        "texture_coverage_top25": float(np.logical_and(active, high_texture).sum() / max(1, int(high_texture.sum()))),
+        "flat_leakage_bottom25": float(np.logical_and(active, flat).sum() / max(1, int(active.sum()))),
+    }
 
 
 def make_outpaint_canvas(
@@ -210,22 +357,12 @@ def adaptive_mask(
     init_image: Image.Image,
     plan: AgentPlan,
     outpaint_mask: Optional[np.ndarray] = None,
+    strategy: Optional[str] = None,
 ) -> Image.Image:
-    detail = frequency_entropy_map(init_image)
-    alpha = float(np.clip(plan.alpha, 0.0, 1.0))
-
-    if plan.mode == "sr":
-        # Conservative SR should refine sparse unreliable detail tokens, not redraw subjects.
-        budget = 0.06 + 0.18 * alpha
-    elif plan.mode == "detail":
-        budget = 0.16 + 0.36 * alpha
-    elif plan.mode == "outpaint":
-        budget = 0.04 + 0.16 * alpha
-    else:
-        budget = 0.14 + 0.36 * alpha
-
-    threshold = float(np.quantile(detail, max(0.0, 1.0 - budget)))
-    mask = detail >= threshold
+    strategy = normalize_mask_strategy(strategy or plan.mask_policy)
+    score, maps = mask_score_map(init_image, strategy)
+    budget = mask_budget_for_plan(plan)
+    mask = _threshold_by_budget(score, budget)
 
     if outpaint_mask is not None:
         mask = np.logical_or(mask, outpaint_mask)
@@ -233,12 +370,40 @@ def adaptive_mask(
         feather_arr = np.asarray(feather, dtype=np.float32) / 255.0
         boundary_band = feather_arr > 0.05
         if plan.boundary_consistency_weight >= 0.70:
+            detail = maps["frequency"]
             mask = np.logical_or(mask, np.logical_and(boundary_band, detail > np.quantile(detail, 0.65)))
 
     mask_img = Image.fromarray(np.uint8(mask) * 255, mode="L")
     if plan.mode in {"outpaint", "sr_outpaint"}:
         return mask_img.filter(ImageFilter.MaxFilter(3))
     return mask_img
+
+
+def save_mask_strategy_artifacts(
+    init_image: Image.Image,
+    mask_image: Image.Image,
+    output_dir: Path,
+    strategy: str,
+) -> Dict[str, str]:
+    score, maps = mask_score_map(init_image, strategy)
+    score_img = Image.fromarray(np.uint8(score * 255), mode="L")
+    frequency_img = Image.fromarray(np.uint8(maps["frequency"] * 255), mode="L")
+    overlay = init_image.convert("RGBA")
+    mask_arr = np.asarray(mask_image.convert("L"), dtype=np.uint8) > 0
+    red = Image.new("RGBA", init_image.size, (255, 40, 40, 92))
+    transparent = Image.new("RGBA", init_image.size, (0, 0, 0, 0))
+    mask_overlay = Image.composite(red, transparent, Image.fromarray(np.uint8(mask_arr) * 255, mode="L"))
+    overlay = Image.alpha_composite(overlay, mask_overlay)
+
+    paths = {
+        "mask_score": output_dir / "mask_score.png",
+        "frequency_map": output_dir / "frequency_map.png",
+        "mask_overlay": output_dir / "mask_overlay.png",
+    }
+    score_img.save(paths["mask_score"])
+    frequency_img.save(paths["frequency_map"])
+    overlay.convert("RGB").save(paths["mask_overlay"])
+    return {key: str(value) for key, value in paths.items()}
 
 
 def downsample_consistency_metrics(candidate: Image.Image, observation: Image.Image) -> Dict[str, float]:
@@ -354,6 +519,7 @@ def build_refinement_assets(
     outpaint_margin_ratio: float = 0.18,
     tile_size: int = 1024,
     tile_overlap: int = 128,
+    mask_strategy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build and save controller assets for Meissonic refinement."""
 
@@ -373,7 +539,8 @@ def build_refinement_assets(
     else:
         init_image = observation.resize(target_size, Image.Resampling.BICUBIC)
 
-    mask_image = adaptive_mask(init_image, plan, outpaint_mask=outpaint_mask)
+    strategy = normalize_mask_strategy(mask_strategy or plan.mask_policy)
+    mask_image = adaptive_mask(init_image, plan, outpaint_mask=outpaint_mask, strategy=strategy)
     metrics = downsample_consistency_metrics(init_image, observation)
 
     paths = {
@@ -386,14 +553,18 @@ def build_refinement_assets(
     init_image.save(paths["init_image"])
     mask_image.save(paths["mask_image"])
     save_plan(plan, paths["plan"])
+    extra_paths = save_mask_strategy_artifacts(init_image, mask_image, output_dir, strategy)
 
     mask_arr = np.asarray(mask_image, dtype=np.uint8) > 0
+    score, maps = mask_score_map(init_image, strategy)
     diagnostics: Dict[str, Any] = {
         **metrics,
         "mode": plan.mode,
         "alpha": plan.alpha,
+        "mask_strategy": strategy,
         "target_resolution": list(target_size),
         "masked_pixel_ratio": float(mask_arr.mean()),
+        **mask_quality_diagnostics(mask_arr, score, maps, mask_budget_for_plan(plan), strategy),
         "protected_bbox": list(protected_bbox),
         "tile_grid": tile_grid(target_size, tile_size=tile_size, overlap=tile_overlap),
     }
@@ -406,5 +577,5 @@ def build_refinement_assets(
         "mask_image": mask_image,
         "plan": plan,
         "diagnostics": diagnostics,
-        "paths": {key: str(value) for key, value in paths.items()},
+        "paths": {**{key: str(value) for key, value in paths.items()}, **extra_paths},
     }

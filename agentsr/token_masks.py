@@ -96,15 +96,16 @@ def build_initial_token_masks(
     target_size: Tuple[int, int],
     vae_scale_factor: int = DEFAULT_VAE_SCALE_FACTOR,
     outpaint_mask: Optional[np.ndarray] = None,
+    token_threshold: float = 0.5,
 ) -> TokenMaskSet:
     """Create initial known/active/commit/outpaint masks from controller output."""
 
     token_shape = infer_token_shape(target_size, vae_scale_factor=vae_scale_factor)
-    active = pixel_mask_to_token_mask(mask_image, token_shape)
+    active = pixel_mask_to_token_mask(mask_image, token_shape, threshold=token_threshold)
     outpaint = np.zeros(token_shape, dtype=bool)
     if outpaint_mask is not None:
         outpaint_img = Image.fromarray(np.uint8(outpaint_mask.astype(bool)) * 255, mode="L")
-        outpaint = pixel_mask_to_token_mask(outpaint_img, token_shape)
+        outpaint = pixel_mask_to_token_mask(outpaint_img, token_shape, threshold=token_threshold)
         active = np.logical_or(active, outpaint)
 
     commit = np.zeros(token_shape, dtype=bool)
@@ -174,10 +175,13 @@ def update_masks_after_round(
         commit=new_commit,
         outpaint=masks.outpaint,
     )
+    active_count = max(1, int(masks.active.sum()))
     diagnostics = {
         "agreement_ratio": float(agreement.mean()),
         "lr_worse_ratio": float(worse.mean()),
+        "active_lr_worse_ratio": float(np.logical_and(worse, masks.active).sum() / active_count),
         "newly_committed_ratio": float(stable.mean()),
+        "stable_active_ratio": float(stable.sum() / active_count),
         "active_ratio": updated.active_ratio,
         "commit_ratio": updated.commit_ratio,
     }

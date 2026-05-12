@@ -449,3 +449,73 @@ Interpretation:
 - The controller no longer lets a single bad Meissonic candidate overwrite the main result.
 - This is still a smoke/safety test, not a quality benchmark.
 - Directory naming note: round_00 stores initial token masks; the first generated candidate is under round_01.
+
+## 2026-05-13 Mask Strategy Sweep and Token Guard Checkpoint
+
+Status: completed.
+
+Goal alignment:
+
+- Added MEISSONIC_SR_AGENT_GOAL.md as the standing project target for Meissonic-SR Agent.
+- The mainline remains frozen Meissonic + partial token masks + candidate reranking + observation-based reject/remask.
+- LR projection is still not used in the main result path.
+
+Implemented:
+
+- Added mask strategies: frequency, edge, variance, hybrid, uncage.
+- Default controller mask policy is now uncage for conservative token-rerank experiments.
+- Added mask strategy artifacts: mask_score.png, frequency_map.png, mask_overlay.png.
+- Added tools/sweep_mask_strategies.py for dry-run strategy comparison.
+- Added --mask_strategy and --token_mask_threshold to tools/agent_mask_sr.py.
+- Added token_threshold to build_initial_token_masks.
+- Added hard known-token merge in MeissonicTokenEditor.refine.
+- Added hard known-pixel composite after VQ decode so known regions visually remain unchanged.
+- Added active_lr_worse_ratio and stable_active_ratio to mask_update diagnostics.
+- Added --reject_active_lr_worse_ratio; candidates with active local LR regression are rejected even when global regression is small.
+- Added tools/vq_roundtrip.py to measure Meissonic VQ encode/decode drift.
+
+Mask sweep:
+
+- Output: outputs/mask_strategy_sweep_dog_4x_tok025
+- Input: outputs/sr_test_pair_dog_4x/lr_input.png, 256x256 -> 1024x1024
+- token_mask_threshold: 0.25
+
+| strategy | pixel active | token active | detail top25 | edge top10 | texture top25 | flat leakage |
+|---|---:|---:|---:|---:|---:|---:|
+| frequency | 0.1232 | 0.1990 | 0.4787 | 1.0000 | 0.1232 | 0.0000 |
+| edge | 0.1254 | 0.2083 | 0.4875 | 1.0000 | 0.1254 | 0.0000 |
+| variance | 0.1232 | 0.1685 | 0.4124 | 0.6863 | 0.1232 | 0.0000 |
+| hybrid | 0.1230 | 0.1965 | 0.4779 | 0.9115 | 0.1230 | 0.0000 |
+| uncage | 0.1230 | 0.1160 | 0.2949 | 0.4804 | 0.1230 | 0.0810 |
+
+Interpretation:
+
+- frequency/edge/hybrid over-target strong edges and create broad structural edit risk.
+- uncage is more conservative at token level and keeps strongest edge cages more frozen, so it is a better first conservative_sr default.
+- token_mask_threshold matters: with threshold 0.5, uncage activates 93 tokens; with threshold 0.25, it activates 475 tokens.
+
+VQ round-trip finding:
+
+- Output: outputs/vq_roundtrip_dog_lr_to_1024
+- base input downsample vs LR PSNR: 46.3594 dB
+- VQ recon downsample vs LR PSNR: 31.9810 dB
+- VQ roundtrip image PSNR: 31.8969 dB
+- VQ roundtrip L1: 5.0024
+- recon LR L1: 4.9597
+
+Interpretation:
+
+- Meissonic VQ decode alone can break LR consistency, so token-level known merge is not enough to visually preserve known regions.
+- Hard known-pixel composite is necessary observation protection, not LR projection.
+
+Smoke results:
+
+- uncage + threshold 0.25 + pixel guard reduced global candidate mean abs from 7.7904 to 3.7865 and known mean abs to 0.0, but candidate LR L1 was still 4.0802 and was rejected.
+- uncage + threshold 0.5 + pixel guard reduced candidate LR L1 to 0.9940, but active_lr_worse_ratio was 1.0 and active tokens could not commit, so the stricter active-local reject now correctly rejects it.
+- candidate_k=2 smoke selected seed 67 over seed 66: total 4.9610 vs 5.0471, but it was still rejected by active_lr_worse_ratio=1.0.
+
+Next:
+
+- Add candidate/metric sweep over mask_strategy, token_mask_threshold, strength, guidance, and candidate_k.
+- Add optional CLIP/VLM-style semantic scoring so evaluation is not only dB/LR error.
+- Investigate active-token acceptance: current Meissonic samples improve visual detail but locally worsen LR in all active tokens for this dog test.

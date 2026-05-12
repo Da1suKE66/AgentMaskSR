@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from agentsr.controller import (  # noqa: E402
     DEFAULT_NEGATIVE_PROMPT,
+    MASK_STRATEGIES,
     build_refinement_assets,
     derive_agent_plan,
     downsample_consistency_metrics,
@@ -62,14 +63,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--dtype', choices=['auto', 'float32', 'float16', 'bfloat16'], default='float32')
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--negative_prompt', default=DEFAULT_NEGATIVE_PROMPT)
+    parser.add_argument(
+        '--mask_strategy',
+        choices=list(MASK_STRATEGIES),
+        default='uncage',
+        help='Pixel-to-token mask policy for partial refinement.',
+    )
 
     parser.add_argument('--rounds', type=int, default=2, help='Token-rerank refinement rounds.')
     parser.add_argument('--candidate_k', type=int, default=2, help='Candidates sampled per token-rerank round.')
     parser.add_argument('--refine_strength', type=float, default=1.0, help='Meissonic inpaint strength for active tokens.')
     parser.add_argument('--token_vae_scale_factor', type=int, default=16, help='Dry-run token grid scale factor.')
+    parser.add_argument('--token_mask_threshold', type=float, default=0.25, help='Pixel-mask occupancy required to activate a token cell.')
     parser.add_argument('--lr_worse_margin', type=float, default=1.0, help='Local LR-error margin before remasking.')
     parser.add_argument('--reject_lr_l1_margin', type=float, default=1.0, help='Reject a candidate when LR L1 is worse than current by this margin.')
     parser.add_argument('--reject_lr_worse_ratio', type=float, default=0.50, help='Reject when this fraction of token cells get worse and LR L1 regresses.')
+    parser.add_argument('--reject_active_lr_worse_ratio', type=float, default=0.50, help='Reject when this fraction of active token cells get locally worse and LR L1 regresses.')
     parser.add_argument('--disable_candidate_reject', action='store_true', help='Disable controller-level reject/rollback safety checks.')
 
     parser.add_argument('--run_projection_ablation', action='store_true', help='Write LR projection as ablation only.')
@@ -219,6 +228,7 @@ def run_token_rerank_sr(
         outpaint_margin_ratio=args.outpaint_margin_ratio,
         tile_size=args.tile_size,
         tile_overlap=args.tile_overlap,
+        mask_strategy=args.mask_strategy,
     )
     x_base_path = output_dir / 'x_base_hr.png'
     assets['init_image'].save(x_base_path)
@@ -227,6 +237,7 @@ def run_token_rerank_sr(
         assets['mask_image'],
         plan.target_resolution,
         vae_scale_factor=args.token_vae_scale_factor,
+        token_threshold=args.token_mask_threshold,
     )
     round0_dir = output_dir / 'round_00'
     save_token_masks_npz(round0_dir / 'token_masks.npz', masks)
@@ -261,6 +272,7 @@ def run_token_rerank_sr(
             assets['mask_image'],
             plan.target_resolution,
             vae_scale_factor=editor.vae_scale_factor,
+            token_threshold=args.token_mask_threshold,
         )
         summary['initial_token_masks'] = mask_metadata(masks)
 
@@ -327,6 +339,15 @@ def run_token_rerank_sr(
                     f'lr_worse_ratio:{mask_update["lr_worse_ratio"]:.6f}'
                     f'>{args.reject_lr_worse_ratio:.6f}'
                 )
+            elif (
+                mask_update.get('active_lr_worse_ratio', 0.0) > args.reject_active_lr_worse_ratio
+                and best_score.lr_l1 > current_lr_l1
+            ):
+                rejected = True
+                reject_reason = (
+                    f'active_lr_worse_ratio:{mask_update["active_lr_worse_ratio"]:.6f}'
+                    f'>{args.reject_active_lr_worse_ratio:.6f}'
+                )
 
         round_summary = {
             'round': round_id + 1,
@@ -381,6 +402,7 @@ def main() -> int:
             alpha=args.alpha,
             outpaint_direction=args.outpaint_direction,
         )
+    plan.mask_policy = args.mask_strategy
 
     if requested_mode == 'token_rerank_sr':
         summary = run_token_rerank_sr(args, input_image, plan, output_dir)
@@ -394,6 +416,7 @@ def main() -> int:
         outpaint_margin_ratio=args.outpaint_margin_ratio,
         tile_size=args.tile_size,
         tile_overlap=args.tile_overlap,
+        mask_strategy=args.mask_strategy,
     )
 
     summary = {

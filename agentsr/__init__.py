@@ -2,6 +2,7 @@
 
 from .controller import (
     AgentPlan,
+    MASK_STRATEGIES,
     build_refinement_assets,
     derive_agent_plan,
     observation_consistency_project,
@@ -14,6 +15,7 @@ __all__ = [
     "AgentPlan",
     "CandidateScore",
     "MeissonicTokenEditor",
+    "MASK_STRATEGIES",
     "ScoreWeights",
     "TokenMaskSet",
     "TokenRefineResult",

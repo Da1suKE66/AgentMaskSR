@@ -78,6 +78,8 @@ class MeissonicTokenEditor:
         temperature: Tuple[float, float],
         strength: float = 1.0,
         seed: Optional[int] = None,
+        preserve_known_tokens: bool = True,
+        preserve_known_pixels: bool = True,
     ) -> TokenRefineResult:
         import torch
 
@@ -86,7 +88,9 @@ class MeissonicTokenEditor:
             generator_device = self.device if str(self.device).startswith("cuda") else "cpu"
             generator = torch.Generator(device=generator_device).manual_seed(int(seed))
 
-        mask_image = token_mask_to_pixel_mask(active_token_mask, image.size)
+        active_mask = np.asarray(active_token_mask, dtype=bool)
+        base_tokens = self.encode_image_tokens(image) if preserve_known_tokens else None
+        mask_image = token_mask_to_pixel_mask(active_mask, image.size)
         with torch.no_grad():
             result = self.pipe(
                 prompt=prompt,
@@ -105,7 +109,19 @@ class MeissonicTokenEditor:
             tokens_np = tokens.detach().cpu().numpy().astype(np.int64)
         else:
             tokens_np = np.asarray(tokens, dtype=np.int64)
+        if preserve_known_tokens and base_tokens is not None:
+            generated = tokens_np[0] if tokens_np.ndim == 3 else tokens_np
+            base = base_tokens[0] if base_tokens.ndim == 3 else base_tokens
+            if generated.shape[-2:] != active_mask.shape:
+                raise ValueError(
+                    f"active token mask shape {active_mask.shape} does not match generated tokens {generated.shape[-2:]}"
+                )
+            merged = np.where(active_mask, generated, base).astype(np.int64)
+            tokens_np = merged[None, ...] if tokens_np.ndim == 3 else merged
         decoded = self.decode_tokens(tokens_np, image.size)
+        if preserve_known_pixels:
+            pixel_mask = token_mask_to_pixel_mask(active_mask, image.size)
+            decoded = Image.composite(decoded, image.convert("RGB"), pixel_mask)
         return TokenRefineResult(image=decoded, tokens=tokens_np, seed=seed)
 
 
