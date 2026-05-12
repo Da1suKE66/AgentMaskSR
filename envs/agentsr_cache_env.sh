@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export AGENTMASKSR_ROOT="/home/ma-user/workspace/llc/AgentMaskSR"
+export AGENTMASKSR_ROOT="/home/ma-user/workspace/llc/AgentSR"
 export AGENTMASKSR_CONDA_PREFIX="/cache/llc/SR"
 export CONDA_PKGS_DIRS="/cache/llc/SR-pkgs"
 export PIP_CACHE_DIR="/cache/llc/SR-pip-cache"
-export HF_HOME="/home/ma-user/workspace/llc/AgentMaskSR/.hf_cache"
-export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
+export HF_HOME="/cache/llc/SR-hf-cache"
+export TRANSFORMERS_CACHE="/cache/llc/SR-hf-cache/hub"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
-export MPLCONFIGDIR="/home/ma-user/workspace/llc/AgentMaskSR/.mplconfig"
+export MPLCONFIGDIR="/cache/llc/SR-mplconfig"
 export PYTHONNOUSERSITE=1
 
 cd "${AGENTMASKSR_ROOT}"

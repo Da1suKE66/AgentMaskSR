@@ -7,7 +7,7 @@ This document tracks the AgentMaskSR research plan and the current state of the 
 All remote project writes must stay inside:
 
 ```text
-/home/ma-user/workspace/llc/AgentMaskSR
+/home/ma-user/workspace/llc/AgentSR
 ```
 
 The conda runtime requested for this project is the only allowed repository-external write location:
@@ -16,7 +16,7 @@ The conda runtime requested for this project is the only allowed repository-exte
 /cache/llc/SR
 ```
 
-Do not modify files outside `/home/ma-user/workspace/llc/AgentMaskSR` except for creating or updating that conda environment. Keep caches under repository-local paths or `/cache/llc/SR-*`.
+Do not modify files outside `/home/ma-user/workspace/llc/AgentSR` except for creating or updating that conda environment. Keep caches under repository-local paths or `/cache/llc/SR-*`.
 
 ## Current Repository Status
 

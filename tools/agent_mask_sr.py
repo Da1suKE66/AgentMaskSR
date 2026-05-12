@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Agent-guided Meissonic SR/detail/outpaint entry point."""
+# Agent-guided Meissonic SR/detail/outpaint entry point.
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from PIL import Image
 
@@ -23,37 +23,61 @@ from agentsr.controller import (  # noqa: E402
     load_plan,
     observation_consistency_project,
 )
+from agentsr.reranker import ScoreWeights, lr_grad_l1, lr_l1, score_candidates, write_scores  # noqa: E402
+from agentsr.token_editor import MeissonicTokenEditor, seed_for_candidate  # noqa: E402
+from agentsr.token_masks import (  # noqa: E402
+    build_initial_token_masks,
+    mask_metadata,
+    save_token_masks_npz,
+    token_mask_to_pixel_mask,
+    update_masks_after_round,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Training-free agent-guided masked token refinement for Meissonic."
+        description='Training-free agent-guided masked token refinement for Meissonic.'
     )
-    parser.add_argument("--input_image", required=True, help="Low-resolution observation image.")
-    parser.add_argument("--output_dir", default="outputs/agent_mask_sr", help="Repository-local output directory.")
-    parser.add_argument("--prompt", default="", help="User instruction or image editing prompt.")
-    parser.add_argument("--plan_json", default=None, help="Optional existing AgentPlan JSON.")
-    parser.add_argument("--mode", choices=["sr", "detail", "outpaint", "sr_outpaint"], default=None)
-    parser.add_argument("--target_resolution", default="1024x1024", help="WIDTHxHEIGHT target resolution.")
-    parser.add_argument("--alpha", type=float, default=None, help="Detail/outpaint strength in [0, 1].")
-    parser.add_argument("--outpaint_direction", nargs="*", default=None, choices=["left", "right", "top", "bottom"])
-    parser.add_argument("--outpaint_margin_ratio", type=float, default=0.18)
-    parser.add_argument("--tile_size", type=int, default=1024)
-    parser.add_argument("--tile_overlap", type=int, default=128)
-    parser.add_argument("--dry_run", action="store_true", help="Only write plan, mask, init image, and metrics.")
-    parser.add_argument("--run_meissonic", action="store_true", help="Run the Meissonic inpaint backend.")
-    parser.add_argument("--model_path", default="MeissonFlow/Meissonic")
-    parser.add_argument("--steps", type=int, default=64)
-    parser.add_argument("--guidance_scale", type=float, default=9.0)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", choices=["auto", "float32", "float16", "bfloat16"], default="float32")
-    parser.add_argument("--skip_consistency_projection", action="store_true")
-    parser.add_argument("--consistency_steps", type=int, default=2)
-    parser.add_argument("--consistency_strength", type=float, default=None)
-    parser.add_argument("--edit_strength", type=float, default=None)
-    parser.add_argument("--mask_blur_radius", type=float, default=6.0)
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--negative_prompt", default=DEFAULT_NEGATIVE_PROMPT)
+    parser.add_argument('--input_image', required=True, help='Low-resolution observation image.')
+    parser.add_argument('--output_dir', default='outputs/agent_mask_sr', help='Repository-local output directory.')
+    parser.add_argument('--prompt', default='', help='User instruction or image editing prompt.')
+    parser.add_argument('--plan_json', default=None, help='Optional existing AgentPlan JSON.')
+    parser.add_argument(
+        '--mode',
+        choices=['sr', 'detail', 'outpaint', 'sr_outpaint', 'token_rerank_sr'],
+        default=None,
+    )
+    parser.add_argument('--target_resolution', default='1024x1024', help='WIDTHxHEIGHT target resolution.')
+    parser.add_argument('--alpha', type=float, default=None, help='Detail/outpaint strength in [0, 1].')
+    parser.add_argument('--outpaint_direction', nargs='*', default=None, choices=['left', 'right', 'top', 'bottom'])
+    parser.add_argument('--outpaint_margin_ratio', type=float, default=0.18)
+    parser.add_argument('--tile_size', type=int, default=1024)
+    parser.add_argument('--tile_overlap', type=int, default=128)
+    parser.add_argument('--dry_run', action='store_true', help='Only write controller assets and token metadata.')
+    parser.add_argument('--run_meissonic', action='store_true', help='Run the Meissonic backend.')
+    parser.add_argument('--model_path', default='MeissonFlow/Meissonic')
+    parser.add_argument('--steps', type=int, default=64)
+    parser.add_argument('--guidance_scale', type=float, default=9.0)
+    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--dtype', choices=['auto', 'float32', 'float16', 'bfloat16'], default='float32')
+    parser.add_argument('--seed', type=int, default=None)
+    parser.add_argument('--negative_prompt', default=DEFAULT_NEGATIVE_PROMPT)
+
+    parser.add_argument('--rounds', type=int, default=2, help='Token-rerank refinement rounds.')
+    parser.add_argument('--candidate_k', type=int, default=2, help='Candidates sampled per token-rerank round.')
+    parser.add_argument('--refine_strength', type=float, default=1.0, help='Meissonic inpaint strength for active tokens.')
+    parser.add_argument('--token_vae_scale_factor', type=int, default=16, help='Dry-run token grid scale factor.')
+    parser.add_argument('--lr_worse_margin', type=float, default=1.0, help='Local LR-error margin before remasking.')
+    parser.add_argument('--reject_lr_l1_margin', type=float, default=1.0, help='Reject a candidate when LR L1 is worse than current by this margin.')
+    parser.add_argument('--reject_lr_worse_ratio', type=float, default=0.50, help='Reject when this fraction of token cells get worse and LR L1 regresses.')
+    parser.add_argument('--disable_candidate_reject', action='store_true', help='Disable controller-level reject/rollback safety checks.')
+
+    parser.add_argument('--run_projection_ablation', action='store_true', help='Write LR projection as ablation only.')
+    parser.add_argument('--skip_consistency_projection', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--consistency_steps', type=int, default=2)
+    parser.add_argument('--consistency_strength', type=float, default=None)
+    parser.add_argument('--edit_strength', type=float, default=None)
+    parser.add_argument('--mask_blur_radius', type=float, default=6.0)
     return parser.parse_args()
 
 
@@ -61,11 +85,11 @@ def ensure_repo_local(path: Path) -> Path:
     resolved = path.resolve()
     repo = REPO_ROOT.resolve()
     if repo not in (resolved, *resolved.parents):
-        raise ValueError(f"output path must stay inside repository: {repo}")
+        raise ValueError(f'output path must stay inside repository: {repo}')
     return resolved
 
 
-def load_meissonic_pipeline(model_path: str, device: str, dtype: str = "float32"):
+def load_meissonic_pipeline(model_path: str, device: str, dtype: str = 'float32'):
     import torch
     from diffusers import VQModel
     from transformers import CLIPTextModelWithProjection, CLIPTokenizer
@@ -74,17 +98,17 @@ def load_meissonic_pipeline(model_path: str, device: str, dtype: str = "float32"
     from src.scheduler import Scheduler
     from src.transformer import Transformer2DModel
 
-    model = Transformer2DModel.from_pretrained(model_path, subfolder="transformer")
-    vq_model = VQModel.from_pretrained(model_path, subfolder="vqvae")
-    text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
-    tokenizer = CLIPTokenizer.from_pretrained(model_path, subfolder="tokenizer")
-    scheduler = Scheduler.from_pretrained(model_path, subfolder="scheduler")
+    model = Transformer2DModel.from_pretrained(model_path, subfolder='transformer')
+    vq_model = VQModel.from_pretrained(model_path, subfolder='vqvae')
+    text_encoder = CLIPTextModelWithProjection.from_pretrained('laion/CLIP-ViT-H-14-laion2B-s32B-b79K')
+    tokenizer = CLIPTokenizer.from_pretrained(model_path, subfolder='tokenizer')
+    scheduler = Scheduler.from_pretrained(model_path, subfolder='scheduler')
 
     dtype_map = {
-        "auto": torch.float16 if device.startswith("cuda") else torch.float32,
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
+        'auto': torch.float16 if device.startswith('cuda') else torch.float32,
+        'float32': torch.float32,
+        'float16': torch.float16,
+        'bfloat16': torch.bfloat16,
     }
     target_dtype = dtype_map[dtype]
     model = model.to(dtype=target_dtype)
@@ -101,70 +125,242 @@ def load_meissonic_pipeline(model_path: str, device: str, dtype: str = "float32"
     return pipe.to(device)
 
 
+def _projection_ablation(args: argparse.Namespace, result: Image.Image, assets: Dict[str, Any], output_dir: Path) -> Dict[str, str]:
+    if args.skip_consistency_projection or not args.run_projection_ablation:
+        return {}
+
+    observation = Image.open(args.input_image).convert('RGB')
+    plan = assets['plan']
+    lr_weight = args.consistency_strength
+    if lr_weight is None:
+        lr_weight = min(plan.lr_consistency_weight, 0.50) if plan.mode == 'sr' else plan.lr_consistency_weight
+    edit_strength = args.edit_strength
+    if edit_strength is None:
+        if plan.mode == 'sr':
+            edit_strength = 0.80 + 0.20 * plan.alpha
+        elif plan.mode == 'detail':
+            edit_strength = 0.75 + 0.20 * plan.alpha
+        else:
+            edit_strength = 0.60 + 0.35 * plan.alpha
+
+    consistent, projection_metrics = observation_consistency_project(
+        result,
+        observation=observation,
+        init_image=assets['init_image'],
+        mask_image=assets['mask_image'],
+        lr_weight=lr_weight,
+        edit_strength=edit_strength,
+        num_steps=args.consistency_steps,
+        mask_blur_radius=args.mask_blur_radius,
+    )
+    consistent_path = output_dir / 'projection_ablation.png'
+    consistent.save(consistent_path)
+    projection_path = output_dir / 'projection_ablation_metrics.json'
+    with projection_path.open('w', encoding='utf-8') as handle:
+        json.dump(projection_metrics, handle, indent=2, ensure_ascii=False)
+        handle.write('\n')
+    return {
+        'projection_ablation_image': str(consistent_path),
+        'projection_ablation_metrics': str(projection_path),
+    }
+
+
 def run_meissonic(args: argparse.Namespace, assets: dict, output_dir: Path) -> dict:
     import torch
 
-    plan = assets["plan"]
+    plan = assets['plan']
     generator = None
     if args.seed is not None:
-        generator = torch.Generator(device=args.device if args.device.startswith("cuda") else "cpu").manual_seed(args.seed)
+        generator = torch.Generator(device=args.device if args.device.startswith('cuda') else 'cpu').manual_seed(args.seed)
 
     pipe = load_meissonic_pipeline(args.model_path, args.device, dtype=args.dtype)
     result = pipe(
         prompt=plan.prompt,
         negative_prompt=args.negative_prompt,
-        image=assets["init_image"],
-        mask_image=assets["mask_image"],
+        image=assets['init_image'],
+        mask_image=assets['mask_image'],
         guidance_scale=args.guidance_scale,
         num_inference_steps=args.steps,
         generator=generator,
         temperature=(max(0.01, plan.temperature), 0.0),
     ).images[0]
 
-    output_path = output_dir / "meissonic_refined.png"
+    output_path = output_dir / 'meissonic_refined.png'
     result.save(output_path)
-    outputs = {"refined_image": str(output_path)}
+    outputs = {'refined_image': str(output_path)}
 
-    metrics = downsample_consistency_metrics(result, Image.open(args.input_image).convert("RGB"))
-    metrics_path = output_dir / "meissonic_metrics.json"
-    with metrics_path.open("w", encoding="utf-8") as handle:
+    metrics = downsample_consistency_metrics(result, Image.open(args.input_image).convert('RGB'))
+    metrics_path = output_dir / 'meissonic_metrics.json'
+    with metrics_path.open('w', encoding='utf-8') as handle:
         json.dump(metrics, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
+        handle.write('\n')
 
-    if not args.skip_consistency_projection:
-        observation = Image.open(args.input_image).convert("RGB")
-        lr_weight = args.consistency_strength
-        if lr_weight is None:
-            lr_weight = min(plan.lr_consistency_weight, 0.50) if plan.mode == "sr" else plan.lr_consistency_weight
-        edit_strength = args.edit_strength
-        if edit_strength is None:
-            if plan.mode == "sr":
-                edit_strength = 0.80 + 0.20 * plan.alpha
-            elif plan.mode == "detail":
-                edit_strength = 0.75 + 0.20 * plan.alpha
-            else:
-                edit_strength = 0.60 + 0.35 * plan.alpha
-
-        consistent, projection_metrics = observation_consistency_project(
-            result,
-            observation=observation,
-            init_image=assets["init_image"],
-            mask_image=assets["mask_image"],
-            lr_weight=lr_weight,
-            edit_strength=edit_strength,
-            num_steps=args.consistency_steps,
-            mask_blur_radius=args.mask_blur_radius,
-        )
-        consistent_path = output_dir / "meissonic_consistent.png"
-        consistent.save(consistent_path)
-        projection_path = output_dir / "consistency_projection_metrics.json"
-        with projection_path.open("w", encoding="utf-8") as handle:
-            json.dump(projection_metrics, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-        outputs["consistent_image"] = str(consistent_path)
-        outputs["consistency_projection_metrics"] = str(projection_path)
-
+    outputs.update(_projection_ablation(args, result, assets, output_dir))
     return outputs
+
+
+def _write_summary(path: Path, summary: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w', encoding='utf-8') as handle:
+        json.dump(summary, handle, indent=2, ensure_ascii=False)
+        handle.write('\n')
+
+
+def run_token_rerank_sr(
+    args: argparse.Namespace,
+    input_image: Image.Image,
+    plan,
+    output_dir: Path,
+) -> Dict[str, Any]:
+    assets = build_refinement_assets(
+        input_image,
+        plan,
+        output_dir,
+        outpaint_margin_ratio=args.outpaint_margin_ratio,
+        tile_size=args.tile_size,
+        tile_overlap=args.tile_overlap,
+    )
+    x_base_path = output_dir / 'x_base_hr.png'
+    assets['init_image'].save(x_base_path)
+
+    masks = build_initial_token_masks(
+        assets['mask_image'],
+        plan.target_resolution,
+        vae_scale_factor=args.token_vae_scale_factor,
+    )
+    round0_dir = output_dir / 'round_00'
+    save_token_masks_npz(round0_dir / 'token_masks.npz', masks)
+    token_mask_to_pixel_mask(masks.active, plan.target_resolution).save(round0_dir / 'active_token_mask.png')
+
+    summary: Dict[str, Any] = {
+        'mode': 'token_rerank_sr',
+        'output_dir': str(output_dir),
+        'dry_run': bool(args.dry_run or not args.run_meissonic),
+        'run_meissonic': bool(args.run_meissonic),
+        'x_base_hr': str(x_base_path),
+        'assets': assets['paths'],
+        'controller_diagnostics': assets['diagnostics'],
+        'initial_token_masks': mask_metadata(masks),
+        'score_weights': ScoreWeights().__dict__,
+        'rounds': [],
+    }
+
+    if args.dry_run or not args.run_meissonic:
+        _write_summary(output_dir / 'run_summary.json', summary)
+        return summary
+
+    pipe = load_meissonic_pipeline(args.model_path, args.device, dtype=args.dtype)
+    editor = MeissonicTokenEditor(pipe)
+    current_image = assets['init_image']
+    z_base = editor.encode_image_tokens(current_image)
+    z_current = z_base
+
+    actual_shape = tuple(z_base.shape[-2:])
+    if actual_shape != masks.shape:
+        masks = build_initial_token_masks(
+            assets['mask_image'],
+            plan.target_resolution,
+            vae_scale_factor=editor.vae_scale_factor,
+        )
+        summary['initial_token_masks'] = mask_metadata(masks)
+
+    for round_id in range(max(0, int(args.rounds))):
+        if not bool(masks.active.any()):
+            summary['rounds'].append({'round': round_id + 1, 'stopped': 'no_active_tokens'})
+            break
+
+        round_dir = output_dir / f'round_{round_id + 1:02d}'
+        round_dir.mkdir(parents=True, exist_ok=True)
+        save_token_masks_npz(round_dir / 'token_masks.npz', masks, z_base=z_base, z_current=z_current)
+        token_mask_to_pixel_mask(masks.active, current_image.size).save(round_dir / 'active_token_mask.png')
+
+        candidates: List[Image.Image] = []
+        candidate_tokens: List[Any] = []
+        seeds: List[Optional[int]] = []
+        for candidate_id in range(max(1, int(args.candidate_k))):
+            seed = seed_for_candidate(args.seed, round_id, candidate_id)
+            result = editor.refine(
+                current_image,
+                masks.active,
+                prompt=plan.prompt,
+                negative_prompt=args.negative_prompt,
+                num_inference_steps=args.steps,
+                guidance_scale=args.guidance_scale,
+                temperature=(max(0.01, plan.temperature), 0.0),
+                strength=args.refine_strength,
+                seed=seed,
+            )
+            candidate_path = round_dir / f'candidate_{candidate_id:02d}.png'
+            result.image.save(candidate_path)
+            candidates.append(result.image)
+            candidate_tokens.append(result.tokens)
+            seeds.append(seed)
+
+        best_id, scores = score_candidates(candidates, current_image, input_image, masks, seeds)
+        write_scores(round_dir / 'candidate_scores.json', scores)
+
+        best_image = candidates[best_id]
+        best_tokens = candidate_tokens[best_id]
+        current_lr_l1 = lr_l1(current_image, input_image)
+        current_lr_grad_l1 = lr_grad_l1(current_image, input_image)
+        next_masks, mask_update = update_masks_after_round(
+            masks,
+            previous_image=current_image,
+            best_image=best_image,
+            observation=input_image,
+            candidate_tokens=candidate_tokens,
+            best_tokens=best_tokens,
+            lr_worse_margin=args.lr_worse_margin,
+        )
+
+        best_score = scores[best_id]
+        rejected = False
+        reject_reason = None
+        if not args.disable_candidate_reject:
+            lr_regression = best_score.lr_l1 - current_lr_l1
+            if lr_regression > args.reject_lr_l1_margin:
+                rejected = True
+                reject_reason = f'lr_l1_regression:{lr_regression:.6f}>{args.reject_lr_l1_margin:.6f}'
+            elif mask_update['lr_worse_ratio'] > args.reject_lr_worse_ratio and best_score.lr_l1 > current_lr_l1:
+                rejected = True
+                reject_reason = (
+                    f'lr_worse_ratio:{mask_update["lr_worse_ratio"]:.6f}'
+                    f'>{args.reject_lr_worse_ratio:.6f}'
+                )
+
+        round_summary = {
+            'round': round_id + 1,
+            'best_candidate': int(best_id),
+            'best_seed': seeds[best_id],
+            'best_score': best_score.total,
+            'current_lr_l1': current_lr_l1,
+            'current_lr_grad_l1': current_lr_grad_l1,
+            'candidate_lr_l1': best_score.lr_l1,
+            'candidate_lr_grad_l1': best_score.lr_grad_l1,
+            'accepted': not rejected,
+            'reject_reason': reject_reason,
+            'mask_update': mask_update,
+        }
+        summary['rounds'].append(round_summary)
+        if rejected:
+            continue
+
+        current_image = best_image
+        z_current = best_tokens
+        masks = next_masks
+
+    final_path = output_dir / 'final_hr.png'
+    current_image.save(final_path)
+    final_metrics = downsample_consistency_metrics(current_image, input_image)
+    summary['final_hr'] = str(final_path)
+    summary['final_metrics'] = final_metrics
+    summary['final_token_masks'] = mask_metadata(masks)
+
+    if args.run_projection_ablation and not args.skip_consistency_projection:
+        summary.update(_projection_ablation(args, current_image, assets, output_dir))
+
+    _write_summary(output_dir / 'run_summary.json', summary)
+    return summary
 
 
 def main() -> int:
@@ -172,17 +368,24 @@ def main() -> int:
     output_dir = ensure_repo_local(Path(args.output_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    input_image = Image.open(args.input_image).convert("RGB")
+    input_image = Image.open(args.input_image).convert('RGB')
+    requested_mode = args.mode
+    controller_mode = 'sr' if requested_mode == 'token_rerank_sr' else requested_mode
     if args.plan_json:
         plan = load_plan(Path(args.plan_json))
     else:
         plan = derive_agent_plan(
             args.prompt,
             target_resolution=args.target_resolution,
-            mode=args.mode,
+            mode=controller_mode,
             alpha=args.alpha,
             outpaint_direction=args.outpaint_direction,
         )
+
+    if requested_mode == 'token_rerank_sr':
+        summary = run_token_rerank_sr(args, input_image, plan, output_dir)
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return 0
 
     assets = build_refinement_assets(
         input_image,
@@ -194,11 +397,12 @@ def main() -> int:
     )
 
     summary = {
-        "output_dir": str(output_dir),
-        "dry_run": args.dry_run,
-        "run_meissonic": args.run_meissonic,
-        "assets": assets["paths"],
-        "diagnostics": assets["diagnostics"],
+        'output_dir': str(output_dir),
+        'dry_run': args.dry_run,
+        'run_meissonic': args.run_meissonic,
+        'projection_default': 'disabled; use --run_projection_ablation',
+        'assets': assets['paths'],
+        'diagnostics': assets['diagnostics'],
     }
 
     if args.run_meissonic and not args.dry_run:
@@ -208,5 +412,5 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

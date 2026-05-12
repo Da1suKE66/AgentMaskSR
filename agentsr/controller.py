@@ -215,9 +215,10 @@ def adaptive_mask(
     alpha = float(np.clip(plan.alpha, 0.0, 1.0))
 
     if plan.mode == "sr":
-        budget = 0.10 + 0.30 * alpha
+        # Conservative SR should refine sparse unreliable detail tokens, not redraw subjects.
+        budget = 0.06 + 0.18 * alpha
     elif plan.mode == "detail":
-        budget = 0.20 + 0.45 * alpha
+        budget = 0.16 + 0.36 * alpha
     elif plan.mode == "outpaint":
         budget = 0.04 + 0.16 * alpha
     else:
@@ -235,7 +236,9 @@ def adaptive_mask(
             mask = np.logical_or(mask, np.logical_and(boundary_band, detail > np.quantile(detail, 0.65)))
 
     mask_img = Image.fromarray(np.uint8(mask) * 255, mode="L")
-    return mask_img.filter(ImageFilter.MaxFilter(3))
+    if plan.mode in {"outpaint", "sr_outpaint"}:
+        return mask_img.filter(ImageFilter.MaxFilter(3))
+    return mask_img
 
 
 def downsample_consistency_metrics(candidate: Image.Image, observation: Image.Image) -> Dict[str, float]:

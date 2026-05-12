@@ -7,7 +7,7 @@ This document records concrete AgentMaskSR file changes.
 Remote write operations must stay inside:
 
 ```text
-/home/ma-user/workspace/llc/AgentMaskSR
+/home/ma-user/workspace/llc/AgentSR
 ```
 
 The requested conda environment is installed at:
@@ -23,7 +23,7 @@ Do not write code, logs, checkpoints, or experiment outputs outside the reposito
 Cloned official Meissonic into:
 
 ```text
-/home/ma-user/workspace/llc/AgentMaskSR
+/home/ma-user/workspace/llc/AgentSR
 ```
 
 Source:
@@ -122,7 +122,7 @@ accelerate 1.10.1
 Downloaded Hugging Face weights into:
 
 ```text
-/home/ma-user/workspace/llc/AgentMaskSR/.hf_cache
+/home/ma-user/workspace/llc/AgentSR/.hf_cache
 ```
 
 Fixes made while running the full pipeline:
@@ -168,3 +168,173 @@ Measured improvement:
 PSNR before projection = 16.436645479455237 dB
 PSNR after projection = 27.32617890889089 dB
 ```
+
+
+## 2026-05-12 Token+Rerank MVP Implementation
+
+Status: implemented and dry-run validated.
+
+Implemented changes:
+
+- Fixed old absolute workspace path references from previous AgentMaskSR workspace path to /home/ma-user/workspace/llc/AgentSR in key docs and envs/agentsr_cache_env.sh.
+- Added agentsr/token_masks.py for token-grid known, active, commit, and outpaint masks.
+- Added agentsr/reranker.py for candidate LR L1, LR gradient L1, boundary L1, edit-penalty scoring, and score JSON output.
+- Added agentsr/token_editor.py as a frozen Meissonic VQ-token editor wrapper exposing encode, decode, partial-mask refine, and candidate tokens.
+- Updated tools/agent_mask_sr.py with mode token_rerank_sr.
+- Projection is no longer default behavior. It only runs when --run_projection_ablation is explicitly passed and writes projection_ablation outputs.
+- Added dry-run token metadata output: x_base_hr.png, round_00/token_masks.npz, round_00/active_token_mask.png, and run_summary.json.
+
+Validation:
+
+- python3 -m py_compile agentsr/*.py tools/*.py passed.
+- Runtime imports for token_masks, reranker, and token_editor passed in existing /cache/llc/EditMGT environment.
+- token_rerank_sr dry-run passed with assets/inpaint/0eKR4M2uuL8.jpg at 512x512.
+- Dry-run output directory: outputs/token_rerank_dryrun.
+- Dry-run token shape: 32 x 32.
+- Dry-run active tokens: 330.
+- Dry-run active ratio: 0.322265625.
+
+Notes:
+
+- Full Meissonic token-rerank smoke was not run because the documented /cache/llc/SR conda environment does not exist on lsh-stable and AgentSR has no local Hugging Face model cache yet.
+- The implementation keeps full-run support in place through --mode token_rerank_sr --run_meissonic, but running it will require a valid Meissonic runtime and model cache under AgentSR.
+
+## 2026-05-12 /cache/llc Runtime and HF Cache Setup
+
+Status: completed.
+
+Environment:
+
+- Conda prefix: /cache/llc/SR
+- Source environment: cloned from existing /cache/llc/EditMGT after direct PyTorch wheel download from download.pytorch.org stalled.
+- Python: 3.10.20
+- torch: 2.1.0+cu121
+- CUDA reported by torch: 12.1
+- torch.cuda.is_available(): True
+- diffusers: 0.32.1
+- transformers: 4.47.1
+- HF cache: /cache/llc/SR-hf-cache
+- Hub cache: /cache/llc/SR-hf-cache/hub
+- Matplotlib cache: /cache/llc/SR-mplconfig
+
+Model cache:
+
+- Direct huggingface.co download timed out from lsh-stable.
+- Download succeeded with HF_ENDPOINT=https://hf-mirror.com.
+- Cached models: MeissonFlow/Meissonic and laion/CLIP-ViT-H-14-laion2B-s32B-b79K.
+- Cache size after download: about 24G.
+
+Environment script:
+
+- envs/agentsr_cache_env.sh now activates /cache/llc/SR.
+- HF_HOME now points to /cache/llc/SR-hf-cache.
+- TRANSFORMERS_CACHE now points to /cache/llc/SR-hf-cache/hub so offline from_pretrained can see the downloaded snapshots.
+
+Validation:
+
+- Offline Meissonic pipeline load passed with HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1.
+- token_rerank_sr full smoke passed at 1024x1024 with 1 round, 1 candidate, 1 step.
+- Smoke output directory: outputs/token_rerank_smoke_1024.
+- Output files include final_hr.png, round_01/candidate_00.png, round_01/candidate_scores.json, and token_masks.npz.
+- final_hr.png is non-black: RGB mean approximately [113.09, 109.15, 96.82], channel extrema all span 0 to 255.
+
+Smoke command summary:
+
+source envs/agentsr_cache_env.sh
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python tools/agent_mask_sr.py --input_image assets/inpaint/0eKR4M2uuL8.jpg --output_dir outputs/token_rerank_smoke_1024 --prompt faithful super-resolution --mode token_rerank_sr --target_resolution 1024x1024 --run_meissonic --rounds 1 --candidate_k 1 --steps 1 --guidance_scale 7.0 --seed 66 --dtype float32
+
+Note:
+
+- The smoke run is a functionality check, not a quality benchmark. It used only 1 candidate and 1 step, so the LR metric is expected to be poor.
+
+
+## 2026-05-12 Real LR SR Test Flow and Conservative Mask Update
+
+Status: completed.
+
+Why changed:
+
+- The previous smoke used the original 3927x3927 image as input and targeted 1024x1024, which was a downscale/refine test rather than super-resolution.
+- A controlled 4x SR pair is now generated from the HR sample before running token_rerank_sr.
+
+Added:
+
+- tools/make_sr_test_input.py creates a deterministic LR/HR pair:
+  - center-crop square source image
+  - resize crop to HR reference
+  - downsample HR reference to LR input
+  - write sr_pair_metadata.json
+
+Current test pair:
+
+- Source: assets/inpaint/0eKR4M2uuL8.jpg, 3927x3927
+- HR reference: outputs/sr_test_pair_dog_4x/hr_reference.png, 1024x1024
+- LR input: outputs/sr_test_pair_dog_4x/lr_input.png, 256x256
+- Scale factor: 4x
+
+Mask strategy update:
+
+- Previous SR mask budget: 0.10 + 0.30 * alpha, followed by MaxFilter(3). With alpha 0.35 this produced about 30% masked pixels after dilation.
+- New SR mask budget: 0.06 + 0.18 * alpha, with no dilation for SR mode. With alpha 0.35 this targets about 12.3% masked pixels.
+- Outpaint and sr_outpaint still keep dilation because boundary fill needs connected mask regions.
+
+Real LR dry-run result:
+
+- Output: outputs/token_rerank_real_lr_dryrun
+- masked_pixel_ratio: 0.12315177917480469
+- token_shape: 64x64
+- active_token_ratio: 0.105712890625
+- active_tokens: 433
+
+Real LR smoke result:
+
+- Output: outputs/token_rerank_real_lr_smoke_1024
+- Run: 1024 target, 1 round, 1 candidate, 1 step, seed 66
+- base_down_vs_lr: MSE 1.5036, L1 0.5343, PSNR 46.3594 dB
+- final_down_vs_lr: MSE 328.0215, L1 8.2064, PSNR 22.9718 dB
+- base_vs_hr_reference: PSNR 32.2725 dB
+- final_vs_hr_reference: PSNR 22.3678 dB
+- lr_worse_ratio: 0.994140625
+
+Interpretation:
+
+- The test flow is now a real 256->1024 SR setup.
+- The mask is now much more conservative than before.
+- The full smoke still accepts a bad candidate because candidate_k=1 and no reject/rollback policy is active yet.
+- The next controller fix should reject candidates when LR consistency is worse than the base/current image by a threshold, even before the full agent loop exists.
+
+## 2026-05-13 Candidate Reject/Rollback Smoke
+
+Status: completed.
+
+Change:
+
+- Added default candidate rejection in token_rerank_sr.
+- Projection remains off; rejection is based on observation scoring only.
+- CLI controls added: --reject_lr_l1_margin, --reject_lr_worse_ratio, --disable_candidate_reject.
+
+Run:
+
+- Output: outputs/token_rerank_real_lr_reject_1024
+- Input LR: outputs/sr_test_pair_dog_4x/lr_input.png, 256x256
+- Target/final size: 1024x1024
+- Run: 1 round, candidate_k=1, 1 step, seed 66, dtype float32.
+
+Result:
+
+- Current/base LR L1: 0.5343068242073059
+- Candidate LR L1: 8.206395149230957
+- Candidate LR grad L1: 2.9769833087921143
+- Candidate boundary L1: 21.78203582763672
+- Candidate edit penalty L1: 4.851805686950684
+- Candidate worse ratio: 0.994140625
+- Rejected: lr_l1_regression:7.672088>1.000000
+- Final metrics: MSE 1.5036163330078125, PSNR 46.359433262838095 dB
+- final_hr.png exactly matches x_base_hr.png: max abs diff 0, mean abs diff 0.0.
+- Candidate image differs from base with mean abs diff 8.277235984802246 and is kept only under round_01 for inspection.
+
+Interpretation:
+
+- The controller no longer lets a single bad Meissonic candidate overwrite the main result.
+- This is still a smoke/safety test, not a quality benchmark.
+- Directory naming note: round_00 stores initial token masks; the first generated candidate is under round_01.

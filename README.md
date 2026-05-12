@@ -5,13 +5,13 @@
 This fork is used for the AgentMaskSR research workflow on:
 
 ```text
-lsh-temp:/home/ma-user/workspace/llc/AgentMaskSR
+lsh-stable:/home/ma-user/workspace/llc/AgentSR
 ```
 
 Remote code, logs, Markdown records, and generated experiment summaries must stay inside:
 
 ```text
-/home/ma-user/workspace/llc/AgentMaskSR
+/home/ma-user/workspace/llc/AgentSR
 ```
 
 The isolated conda runtime is the only allowed repository-external write target:
