@@ -325,3 +325,17 @@ Interpretation:
 - This is still a smoke/safety test, not a quality benchmark.
 - Directory naming note: round_00 stores initial token masks; the first generated candidate is under round_01.
 
+## 2026-05-13 GitHub Push Restored
+
+Status: completed.
+
+- GitHub authentication was restored by using ~/.ssh/id_ed25519_github on lsh-stable.
+- The AgentSR repository now has local git config core.sshCommand pointing to that key and GitHub SSH over port 443.
+- origin was changed from HTTPS to git@ssh.github.com:Da1suKE66/AgentMaskSR.git.
+- Checkpoint commit pushed: 57ddb3b Add token rerank SR MVP.
+
+Policy going forward:
+
+- Push after each meaningful implementation or experiment checkpoint.
+- Keep large outputs and HF/model cache out of git; only code, configs, and markdown progress records should be committed.
+
