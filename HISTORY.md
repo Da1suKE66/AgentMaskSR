@@ -641,3 +641,43 @@ Next:
 - Use smaller stage-1 active budgets or stronger protected rings to prevent early-stage drift.
 - Sweep progressive mode over token_threshold 0.65/0.75, strength 0.10/0.15, guidance 3/4.
 - Add per-stage defaults: stage 1 conservative structure recovery, stage 2 texture refinement.
+
+## 2026-05-14 Meissonic-Aware Progressive Sweep
+
+Status: completed.
+
+Implemented:
+
+- Added stage-specific progressive controls:
+  - --stage_token_mask_thresholds
+  - --stage_refine_strengths
+  - --stage_guidance_scales
+  - --stage_steps
+  - --temperature_start
+  - --temperature_end
+- Added tools/summarize_progressive_experiments.py.
+- Generated:
+  - outputs/progressive_experiment_summary.json
+  - outputs/progressive_experiment_summary.md
+- Updated progressive defaults from the best current dog run:
+  - thresholds: 0.70,0.60
+  - strengths: 0.18,0.16
+  - guidance: 3.0,4.0
+  - steps: 24,24
+  - temperature: 0.5 -> 0.0
+  - rounds default: 1
+
+Best result:
+
+- Run: outputs/progressive_exp_stage1_ultra_stage2_conservative_k2
+- Active tokens: stage 1 = 6, stage 2 = 11.
+- Final PSNR downsampled to LR: 37.3643.
+- This improves over the first progressive smoke: 28.3105.
+
+Key findings:
+
+- Stage 1 must be extremely conservative; reducing stage 1 active tokens from 46 to 6 is the largest improvement.
+- K=2 candidate reranking helps.
+- 48 steps and temperature 2.0, closer to the Meissonic paper's default sampling style, did not improve this SR setup.
+- Two rounds currently worsen results; commit/remask still needs a stronger acceptance policy.
+- semantic_uncage still expands active masks too much and should become same-budget semantic token selection.

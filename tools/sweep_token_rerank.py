@@ -44,6 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate_ks", default="1,2")
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--rounds", type=int, default=1)
+    parser.add_argument("--stage_token_mask_thresholds", default=None)
+    parser.add_argument("--stage_refine_strengths", default=None)
+    parser.add_argument("--stage_guidance_scales", default=None)
+    parser.add_argument("--stage_steps", default=None)
+    parser.add_argument("--temperature_start", type=float, default=None)
+    parser.add_argument("--temperature_end", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=66)
     parser.add_argument("--dtype", default="float32", choices=["auto", "float32", "float16", "bfloat16"])
     parser.add_argument("--device", default="cuda")
@@ -129,6 +135,18 @@ def _run_config(args: argparse.Namespace, output_dir: Path, config: Dict[str, An
         "--device",
         args.device,
     ]
+    for arg_name in (
+        "stage_token_mask_thresholds",
+        "stage_refine_strengths",
+        "stage_guidance_scales",
+        "stage_steps",
+    ):
+        value = getattr(args, arg_name)
+        if value is not None:
+            cmd.extend([f"--{arg_name}", value])
+    if args.temperature_start is not None:
+        cmd.extend(["--temperature_start", str(args.temperature_start)])
+    cmd.extend(["--temperature_end", str(args.temperature_end)])
     if args.semantic_refine_prompts is not None:
         cmd.extend(["--semantic_refine_prompts", args.semantic_refine_prompts])
     if args.semantic_protect_prompts is not None:

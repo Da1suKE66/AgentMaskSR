@@ -81,12 +81,18 @@ def parse_args() -> argparse.Namespace:
         help='Pixel-to-token mask policy for partial refinement.',
     )
 
-    parser.add_argument('--rounds', type=int, default=2, help='Token-rerank refinement rounds.')
+    parser.add_argument('--rounds', type=int, default=1, help='Token-rerank refinement rounds.')
     parser.add_argument('--candidate_k', type=int, default=2, help='Candidates sampled per token-rerank round.')
     parser.add_argument('--progressive_scale_factor', type=int, default=2, help='Scale factor per progressive SR stage.')
+    parser.add_argument('--stage_token_mask_thresholds', default=None, help='Comma-separated token thresholds per progressive stage.')
+    parser.add_argument('--stage_refine_strengths', default=None, help='Comma-separated Meissonic strengths per progressive stage.')
+    parser.add_argument('--stage_guidance_scales', default=None, help='Comma-separated CFG values per progressive stage.')
+    parser.add_argument('--stage_steps', default=None, help='Comma-separated inference steps per progressive stage.')
     parser.add_argument('--refine_strength', type=float, default=1.0, help='Meissonic inpaint strength for active tokens.')
     parser.add_argument('--token_vae_scale_factor', type=int, default=16, help='Dry-run token grid scale factor.')
     parser.add_argument('--token_mask_threshold', type=float, default=0.25, help='Pixel-mask occupancy required to activate a token cell.')
+    parser.add_argument('--temperature_start', type=float, default=None, help='Override Meissonic masked-token sampling start temperature.')
+    parser.add_argument('--temperature_end', type=float, default=0.0, help='Meissonic masked-token sampling end temperature.')
     parser.add_argument('--lr_worse_margin', type=float, default=1.0, help='Local LR-error margin before remasking.')
     parser.add_argument('--reject_lr_l1_margin', type=float, default=1.0, help='Reject a candidate when LR L1 is worse than current by this margin.')
     parser.add_argument('--reject_lr_worse_ratio', type=float, default=0.50, help='Reject when this fraction of token cells get worse and LR L1 regresses.')
@@ -214,7 +220,7 @@ def run_meissonic(args: argparse.Namespace, assets: dict, output_dir: Path) -> d
         guidance_scale=args.guidance_scale,
         num_inference_steps=args.steps,
         generator=generator,
-        temperature=(max(0.01, plan.temperature), 0.0),
+        temperature=_temperature_tuple(args, plan),
     ).images[0]
 
     output_path = output_dir / 'meissonic_refined.png'
@@ -280,6 +286,29 @@ def _mask_after_rejected_candidate(masks: TokenMaskSet, next_masks: TokenMaskSet
         commit=masks.commit,
         outpaint=masks.outpaint,
     )
+
+
+def _parse_stage_values(value: Optional[str], cast, name: str) -> List[Any]:
+    if value is None:
+        return []
+    parsed = [cast(item.strip()) for item in value.split(',') if item.strip()]
+    if not parsed:
+        raise ValueError(f'{name} did not contain any values')
+    return parsed
+
+
+def _stage_value(values: List[Any], stage_idx: int, default: Any) -> Any:
+    if not values:
+        return default
+    index = min(max(0, stage_idx - 1), len(values) - 1)
+    return values[index]
+
+
+def _temperature_tuple(args: argparse.Namespace, plan: AgentPlan) -> Tuple[float, float]:
+    start = args.temperature_start
+    if start is None:
+        start = max(0.01, float(plan.temperature))
+    return (float(start), float(args.temperature_end))
 
 
 def run_token_rerank_sr(
@@ -379,7 +408,7 @@ def run_token_rerank_sr(
                 negative_prompt=args.negative_prompt,
                 num_inference_steps=args.steps,
                 guidance_scale=args.guidance_scale,
-                temperature=(max(0.01, plan.temperature), 0.0),
+                temperature=_temperature_tuple(args, plan),
                 strength=args.refine_strength,
                 seed=seed,
             )
@@ -512,6 +541,20 @@ def run_progressive_token_rerank_sr(
         plan.target_resolution,
         scale_factor=args.progressive_scale_factor,
     )
+    stage_thresholds = _parse_stage_values(args.stage_token_mask_thresholds, float, 'stage_token_mask_thresholds')
+    stage_strengths = _parse_stage_values(args.stage_refine_strengths, float, 'stage_refine_strengths')
+    stage_guidance = _parse_stage_values(args.stage_guidance_scales, float, 'stage_guidance_scales')
+    stage_steps = _parse_stage_values(args.stage_steps, int, 'stage_steps')
+    if not stage_thresholds:
+        stage_thresholds = [0.70, 0.60]
+    if not stage_strengths:
+        stage_strengths = [0.18, 0.16]
+    if not stage_guidance:
+        stage_guidance = [3.0, 4.0]
+    if not stage_steps:
+        stage_steps = [24, 24]
+    if args.temperature_start is None:
+        args.temperature_start = 0.5
     summary: Dict[str, Any] = {
         'mode': 'progressive_token_rerank_sr',
         'output_dir': str(output_dir),
@@ -521,6 +564,13 @@ def run_progressive_token_rerank_sr(
         'target_resolution': list(plan.target_resolution),
         'progressive_scale_factor': int(args.progressive_scale_factor),
         'stage_sizes': [list(size) for size in stage_sizes],
+        'stage_overrides': {
+            'token_mask_thresholds': stage_thresholds,
+            'refine_strengths': stage_strengths,
+            'guidance_scales': stage_guidance,
+            'steps': stage_steps,
+            'temperature': list(_temperature_tuple(args, plan)),
+        },
         'score_reference': 'previous_stage_image',
         'original_lr_reference': 'input_image',
         'score_weights': ScoreWeights(
@@ -548,6 +598,10 @@ def run_progressive_token_rerank_sr(
         stage_dir.mkdir(parents=True, exist_ok=True)
         stage_plan = _clone_plan_for_stage(plan, stage_size)
         stage_plan.mask_policy = args.mask_strategy
+        stage_token_threshold = float(_stage_value(stage_thresholds, stage_idx, args.token_mask_threshold))
+        stage_strength = float(_stage_value(stage_strengths, stage_idx, args.refine_strength))
+        stage_guidance_scale = float(_stage_value(stage_guidance, stage_idx, args.guidance_scale))
+        stage_num_steps = int(_stage_value(stage_steps, stage_idx, args.steps))
 
         assets = build_refinement_assets(
             current_stage_input,
@@ -571,7 +625,7 @@ def run_progressive_token_rerank_sr(
             assets['mask_image'],
             stage_plan.target_resolution,
             vae_scale_factor=args.token_vae_scale_factor,
-            token_threshold=args.token_mask_threshold,
+            token_threshold=stage_token_threshold,
         )
         round0_dir = stage_dir / 'round_00'
         save_token_masks_npz(round0_dir / 'token_masks.npz', masks)
@@ -585,6 +639,13 @@ def run_progressive_token_rerank_sr(
             'x_base_stage': str(stage_base_path),
             'assets': assets['paths'],
             'controller_diagnostics': assets['diagnostics'],
+            'stage_params': {
+                'token_mask_threshold': stage_token_threshold,
+                'refine_strength': stage_strength,
+                'guidance_scale': stage_guidance_scale,
+                'steps': stage_num_steps,
+                'temperature': list(_temperature_tuple(args, stage_plan)),
+            },
             'initial_token_masks': mask_metadata(masks),
             'rounds': [],
         }
@@ -617,7 +678,7 @@ def run_progressive_token_rerank_sr(
                 assets['mask_image'],
                 stage_plan.target_resolution,
                 vae_scale_factor=editor.vae_scale_factor,
-                token_threshold=args.token_mask_threshold,
+                token_threshold=stage_token_threshold,
             )
             stage_summary['initial_token_masks'] = mask_metadata(masks)
 
@@ -642,10 +703,10 @@ def run_progressive_token_rerank_sr(
                     masks.active,
                     prompt=stage_plan.prompt,
                     negative_prompt=args.negative_prompt,
-                    num_inference_steps=args.steps,
-                    guidance_scale=args.guidance_scale,
-                    temperature=(max(0.01, stage_plan.temperature), 0.0),
-                    strength=args.refine_strength,
+                    num_inference_steps=stage_num_steps,
+                    guidance_scale=stage_guidance_scale,
+                    temperature=_temperature_tuple(args, stage_plan),
+                    strength=stage_strength,
                     seed=seed,
                 )
                 candidate_path = round_dir / f'candidate_{candidate_id:02d}.png'
