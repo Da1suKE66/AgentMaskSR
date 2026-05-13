@@ -18,6 +18,8 @@ if str(REPO_ROOT) not in sys.path:
 from agentsr.controller import MASK_STRATEGIES, build_refinement_assets, derive_agent_plan  # noqa: E402
 from agentsr.token_masks import build_initial_token_masks, mask_metadata, save_token_masks_npz, token_mask_to_pixel_mask  # noqa: E402
 
+DEFAULT_SWEEP_STRATEGIES = [strategy for strategy in MASK_STRATEGIES if strategy != "semantic_uncage"]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare deterministic SR mask strategies without running Meissonic.")
@@ -29,7 +31,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.35)
     parser.add_argument("--token_vae_scale_factor", type=int, default=16)
     parser.add_argument("--token_mask_threshold", type=float, default=0.25)
-    parser.add_argument("--strategies", nargs="*", choices=list(MASK_STRATEGIES), default=list(MASK_STRATEGIES))
+    parser.add_argument("--strategies", nargs="*", choices=list(MASK_STRATEGIES), default=DEFAULT_SWEEP_STRATEGIES)
+    parser.add_argument("--semantic_refine_prompts", default=None)
+    parser.add_argument("--semantic_protect_prompts", default=None)
+    parser.add_argument("--semantic_clip_model_path", default="laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
+    parser.add_argument("--semantic_clip_device", default="cpu")
+    parser.add_argument("--semantic_grid_size", type=int, default=8)
+    parser.add_argument("--semantic_batch_size", type=int, default=16)
     parser.add_argument("--outpaint_direction", nargs="*", default=None, choices=["left", "right", "top", "bottom"])
     parser.add_argument("--outpaint_margin_ratio", type=float, default=0.18)
     parser.add_argument("--tile_size", type=int, default=1024)
@@ -138,6 +146,12 @@ def main() -> int:
             tile_size=args.tile_size,
             tile_overlap=args.tile_overlap,
             mask_strategy=strategy,
+            semantic_refine_prompts=args.semantic_refine_prompts,
+            semantic_protect_prompts=args.semantic_protect_prompts,
+            semantic_clip_model_path=args.semantic_clip_model_path,
+            semantic_clip_device=args.semantic_clip_device,
+            semantic_grid_size=args.semantic_grid_size,
+            semantic_batch_size=args.semantic_batch_size,
         )
         masks = build_initial_token_masks(
             assets["mask_image"],

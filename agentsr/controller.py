@@ -35,6 +35,7 @@ MASK_STRATEGIES = (
     "variance",
     "hybrid",
     "uncage",
+    "semantic_uncage",
 )
 
 
@@ -220,7 +221,11 @@ def _deterministic_blue_noise(shape: Tuple[int, int]) -> np.ndarray:
     return (hashed - np.floor(hashed)).astype(np.float32)
 
 
-def mask_score_map(init_image: Image.Image, strategy: str) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+def mask_score_map(
+    init_image: Image.Image,
+    strategy: str,
+    semantic_prior: Optional[Mapping[str, np.ndarray]] = None,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Return a normalized score map for a named mask strategy."""
 
     strategy = normalize_mask_strategy(strategy)
@@ -238,13 +243,29 @@ def mask_score_map(init_image: Image.Image, strategy: str) -> Tuple[np.ndarray, 
         score = variance
     elif strategy == "hybrid":
         score = 0.50 * frequency + 0.30 * variance + 0.15 * gradient + 0.05 * blue
-    elif strategy == "uncage":
+    elif strategy in {"uncage", "semantic_uncage"}:
         # Uncage keeps the strongest structure lines as a cage while releasing
         # sparse texture/detail islands around them. This avoids large connected
         # redraw areas in conservative SR.
         strong_edge = gradient >= np.quantile(gradient, 0.92)
-        score = 0.45 * variance + 0.35 * frequency + 0.20 * blue
-        score = np.where(strong_edge & (variance < np.quantile(variance, 0.70)), score * 0.35, score)
+        base_score = 0.45 * variance + 0.35 * frequency + 0.20 * blue
+        base_score = np.where(strong_edge & (variance < np.quantile(variance, 0.70)), base_score * 0.35, base_score)
+        if strategy == "semantic_uncage" and semantic_prior is not None:
+            semantic_score = np.asarray(semantic_prior.get("semantic_score"), dtype=np.float32)
+            protect_score = np.asarray(semantic_prior.get("semantic_protect"), dtype=np.float32)
+            if semantic_score.shape != base_score.shape:
+                raise ValueError(
+                    f"semantic score shape {semantic_score.shape} does not match mask score shape {base_score.shape}"
+                )
+            maps["semantic_score"] = _normalize_array(semantic_score)
+            maps["semantic_protect"] = _normalize_array(protect_score)
+            base_norm = _normalize_array(base_score)
+            score = base_norm * (0.85 + 0.45 * maps["semantic_score"])
+            score = score - 0.40 * maps["semantic_protect"]
+            high_protect = maps["semantic_protect"] >= np.quantile(maps["semantic_protect"], 0.75)
+            score = np.where(high_protect, score * 0.55, score)
+        else:
+            score = base_score
     else:
         raise ValueError(f"unknown mask strategy: {strategy}")
     return _normalize_array(score), maps
@@ -264,6 +285,9 @@ def normalize_mask_strategy(strategy: Optional[str]) -> str:
         "mixed": "hybrid",
         "blue_noise": "uncage",
         "uncaged": "uncage",
+        "semantic": "semantic_uncage",
+        "vlm_uncage": "semantic_uncage",
+        "clip_uncage": "semantic_uncage",
     }
     clean = aliases.get(clean, clean)
     if clean not in MASK_STRATEGIES:
@@ -319,6 +343,21 @@ def mask_quality_diagnostics(
         "edge_coverage_top10": float(np.logical_and(active, strong_edge).sum() / max(1, int(strong_edge.sum()))),
         "texture_coverage_top25": float(np.logical_and(active, high_texture).sum() / max(1, int(high_texture.sum()))),
         "flat_leakage_bottom25": float(np.logical_and(active, flat).sum() / max(1, int(active.sum()))),
+        **(
+            {
+                "semantic_score_mean_active": float(maps["semantic_score"][active].mean()),
+                "semantic_protect_mean_active": float(maps["semantic_protect"][active].mean()),
+                "semantic_protect_top25_leakage": float(
+                    np.logical_and(
+                        active,
+                        maps["semantic_protect"] >= np.quantile(maps["semantic_protect"], 0.75),
+                    ).sum()
+                    / max(1, int(active.sum()))
+                ),
+            }
+            if "semantic_score" in maps and "semantic_protect" in maps
+            else {}
+        ),
     }
 
 
@@ -358,9 +397,10 @@ def adaptive_mask(
     plan: AgentPlan,
     outpaint_mask: Optional[np.ndarray] = None,
     strategy: Optional[str] = None,
+    semantic_prior: Optional[Mapping[str, np.ndarray]] = None,
 ) -> Image.Image:
     strategy = normalize_mask_strategy(strategy or plan.mask_policy)
-    score, maps = mask_score_map(init_image, strategy)
+    score, maps = mask_score_map(init_image, strategy, semantic_prior=semantic_prior)
     budget = mask_budget_for_plan(plan)
     mask = _threshold_by_budget(score, budget)
 
@@ -384,8 +424,9 @@ def save_mask_strategy_artifacts(
     mask_image: Image.Image,
     output_dir: Path,
     strategy: str,
+    semantic_prior: Optional[Mapping[str, np.ndarray]] = None,
 ) -> Dict[str, str]:
-    score, maps = mask_score_map(init_image, strategy)
+    score, maps = mask_score_map(init_image, strategy, semantic_prior=semantic_prior)
     score_img = Image.fromarray(np.uint8(score * 255), mode="L")
     frequency_img = Image.fromarray(np.uint8(maps["frequency"] * 255), mode="L")
     overlay = init_image.convert("RGBA")
@@ -403,6 +444,13 @@ def save_mask_strategy_artifacts(
     score_img.save(paths["mask_score"])
     frequency_img.save(paths["frequency_map"])
     overlay.convert("RGB").save(paths["mask_overlay"])
+    if "semantic_score" in maps:
+        semantic_score_path = output_dir / "semantic_score_map.png"
+        semantic_protect_path = output_dir / "semantic_protect_map.png"
+        Image.fromarray(np.uint8(maps["semantic_score"] * 255), mode="L").save(semantic_score_path)
+        Image.fromarray(np.uint8(maps["semantic_protect"] * 255), mode="L").save(semantic_protect_path)
+        paths["semantic_score_map"] = semantic_score_path
+        paths["semantic_protect_map"] = semantic_protect_path
     return {key: str(value) for key, value in paths.items()}
 
 
@@ -520,6 +568,12 @@ def build_refinement_assets(
     tile_size: int = 1024,
     tile_overlap: int = 128,
     mask_strategy: Optional[str] = None,
+    semantic_refine_prompts: Optional[Sequence[str]] = None,
+    semantic_protect_prompts: Optional[Sequence[str]] = None,
+    semantic_clip_model_path: str = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+    semantic_clip_device: str = "cpu",
+    semantic_grid_size: int = 8,
+    semantic_batch_size: int = 16,
 ) -> Dict[str, Any]:
     """Build and save controller assets for Meissonic refinement."""
 
@@ -540,7 +594,31 @@ def build_refinement_assets(
         init_image = observation.resize(target_size, Image.Resampling.BICUBIC)
 
     strategy = normalize_mask_strategy(mask_strategy or plan.mask_policy)
-    mask_image = adaptive_mask(init_image, plan, outpaint_mask=outpaint_mask, strategy=strategy)
+    semantic_prior_maps = None
+    semantic_diagnostics: Dict[str, Any] = {}
+    if strategy == "semantic_uncage":
+        from .semantic_guidance import CLIPRegionPrior
+
+        semantic_prior = CLIPRegionPrior(
+            model_path=semantic_clip_model_path,
+            device=semantic_clip_device,
+        ).build_prior(
+            init_image,
+            refine_prompts=semantic_refine_prompts,
+            protect_prompts=semantic_protect_prompts,
+            grid_size=semantic_grid_size,
+            batch_size=semantic_batch_size,
+        )
+        semantic_prior_maps = semantic_prior.maps()
+        semantic_diagnostics = dict(semantic_prior.diagnostics)
+
+    mask_image = adaptive_mask(
+        init_image,
+        plan,
+        outpaint_mask=outpaint_mask,
+        strategy=strategy,
+        semantic_prior=semantic_prior_maps,
+    )
     metrics = downsample_consistency_metrics(init_image, observation)
 
     paths = {
@@ -553,12 +631,13 @@ def build_refinement_assets(
     init_image.save(paths["init_image"])
     mask_image.save(paths["mask_image"])
     save_plan(plan, paths["plan"])
-    extra_paths = save_mask_strategy_artifacts(init_image, mask_image, output_dir, strategy)
+    extra_paths = save_mask_strategy_artifacts(init_image, mask_image, output_dir, strategy, semantic_prior=semantic_prior_maps)
 
     mask_arr = np.asarray(mask_image, dtype=np.uint8) > 0
-    score, maps = mask_score_map(init_image, strategy)
+    score, maps = mask_score_map(init_image, strategy, semantic_prior=semantic_prior_maps)
     diagnostics: Dict[str, Any] = {
         **metrics,
+        **semantic_diagnostics,
         "mode": plan.mode,
         "alpha": plan.alpha,
         "mask_strategy": strategy,

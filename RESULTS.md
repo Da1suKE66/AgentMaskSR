@@ -564,3 +564,88 @@ Next:
 - Run broader sweeps over token_threshold 0.35/0.5, strength 0.15/0.25/0.35, guidance 3/4/5, and candidate_k 2/4.
 - Add an agent planner that consumes sweep/round metrics and proposes the next mask/parameter plan.
 - Start semantic acceptance checks using CLIP/image similarity first, then VLM/OCR/face analyzers when available.
+
+## 2026-05-13 Semantic-Guided Active Mask Pilot
+
+Status: completed.
+
+Implemented:
+
+- Added agentsr/semantic_guidance.py with CLIPRegionPrior.
+- Added a new mask policy: semantic_uncage.
+- semantic_uncage uses CLIP crop-text similarities as coarse semantic priors:
+  - refine prompts increase active priority.
+  - protect prompts suppress active priority.
+  - the current implementation reweights the base uncage score rather than replacing it.
+- Added semantic prompt CLI controls:
+  - --semantic_refine_prompts
+  - --semantic_protect_prompts
+  - --semantic_clip_model_path
+  - --semantic_clip_device
+  - --semantic_grid_size
+  - --semantic_batch_size
+- Mask artifacts now include semantic_score_map.png and semantic_protect_map.png for semantic_uncage.
+
+Dog 4x dry-run comparison:
+
+- Output: outputs/semantic_mask_guidance_dog_dryrun
+- Prompts:
+  - refine: fine dog fur texture; animal hair detail; natural background texture
+  - protect: dog eyes; dog nose; dog face outline; object boundary; text logo
+- Original uncage, alpha 0.35, token_threshold 0.5:
+  - active tokens: 93
+  - active ratio: 0.0227
+  - edge coverage top10: 0.4804
+- Initial additive semantic_uncage, alpha 0.35:
+  - active tokens: 435
+  - active ratio: 0.1062
+  - edge coverage top10: 0.2900
+  - semantic_score_mean_active: 0.8754
+  - semantic_protect_top25_leakage: 0.0756
+- Conservative semantic_uncage, alpha 0.0:
+  - active tokens: 244
+  - active ratio: 0.0596
+  - semantic_score_mean_active: 0.9298
+  - semantic_protect_top25_leakage: 0.0121
+- Reweighted semantic_uncage, alpha 0.35:
+  - active tokens: 193
+  - active ratio: 0.0471
+  - edge coverage top10: 0.3033
+  - semantic_score_mean_active: 0.6309
+  - semantic_protect_top25_leakage: 0.0281
+
+Meissonic smoke comparison:
+
+- Baseline output: outputs/semantic_guided_active_sweep_dog/uncage_tok0p50_str0p15_gs4p0_k2
+- Initial semantic output: outputs/semantic_guided_active_sweep_dog/semantic_uncage_tok0p50_str0p15_gs4p0_k2
+- Reweighted semantic output: outputs/semantic_uncage_reweight_k2_smoke_1024
+
+| policy | active tokens | candidate LR L1 | boundary L1 | CLIP text | CLIP image | accept |
+|---|---:|---:|---:|---:|---:|---|
+| uncage | 93 | 0.9649 | 7.2640 | 0.2666 | 0.9905 | rejected, active_lr_worse_ratio=1.0 |
+| semantic_uncage additive | 435 | 4.8693 | 11.7317 | 0.2397 | 0.8472 | rejected, LR regression |
+| semantic_uncage reweighted | 193 | 2.1385 | 10.5439 | 0.2756 | 0.9784 | rejected, LR regression |
+| semantic_uncage reweighted, token_threshold 0.65 | 71 | 0.9765 | 9.2734 | 0.2656 | 0.9917 | rejected, active_lr_worse_ratio=1.0 |
+
+Budget-aligned semantic check:
+
+- Output: outputs/semantic_uncage_reweight_th0.65_k2_smoke_1024
+- token_threshold 0.65 reduced semantic_uncage to 71 active tokens, closer to uncage's 93 active tokens.
+- LR L1 became comparable to uncage, but boundary L1 stayed worse: 9.2734 vs 7.2640.
+- CLIP image similarity improved slightly: 0.9917 vs 0.9905.
+- CLIP text similarity did not improve: 0.2656 vs 0.2666.
+- This means the current CLIP prior can steer active region selection, but it is not yet a quality win.
+
+Interpretation:
+
+- CLIP semantic prior does guide active regions: it lowers structural edge coverage and raises semantic/refine-region priority.
+- The first naive semantic mask does not improve SR consistency on the dog test. It increases active area and worsens LR/boundary consistency.
+- Reweighting semantic prior through uncage is better than additive replacement, but still worse than the original smaller uncage mask on LR consistency.
+- The useful role for CLIP/VLM is currently protection/reranking/planning, not direct mask expansion.
+- Next semantic mask version should keep the active token budget matched to baseline and use semantic prior mainly to suppress protected regions or choose among same-budget candidate tokens.
+
+Next:
+
+- Add a same-budget semantic token selector: start from uncage token candidates, then swap tokens by semantic refine/protect score without increasing active token count.
+- Add semantic protect hard-freeze masks for eyes/nose/text/object boundary before active token selection.
+- Evaluate semantic guidance with matched active token counts, not only matched pixel mask budget.

@@ -86,6 +86,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--clip_score_device', default='cpu')
     parser.add_argument('--clip_text_weight', type=float, default=0.0, help='Subtract this weight times CLIP text similarity from candidate score.')
     parser.add_argument('--clip_image_weight', type=float, default=0.0, help='Subtract this weight times CLIP image-reference similarity from candidate score.')
+    parser.add_argument('--semantic_refine_prompts', default=None, help='Semicolon-separated prompts that should increase active-mask priority.')
+    parser.add_argument('--semantic_protect_prompts', default=None, help='Semicolon-separated prompts that should decrease active-mask priority.')
+    parser.add_argument('--semantic_clip_model_path', default='laion/CLIP-ViT-H-14-laion2B-s32B-b79K')
+    parser.add_argument('--semantic_clip_device', default='cpu')
+    parser.add_argument('--semantic_grid_size', type=int, default=8)
+    parser.add_argument('--semantic_batch_size', type=int, default=16)
 
     parser.add_argument('--run_projection_ablation', action='store_true', help='Write LR projection as ablation only.')
     parser.add_argument('--skip_consistency_projection', action='store_true', help=argparse.SUPPRESS)
@@ -235,6 +241,12 @@ def run_token_rerank_sr(
         tile_size=args.tile_size,
         tile_overlap=args.tile_overlap,
         mask_strategy=args.mask_strategy,
+        semantic_refine_prompts=args.semantic_refine_prompts,
+        semantic_protect_prompts=args.semantic_protect_prompts,
+        semantic_clip_model_path=args.semantic_clip_model_path,
+        semantic_clip_device=args.semantic_clip_device,
+        semantic_grid_size=args.semantic_grid_size,
+        semantic_batch_size=args.semantic_batch_size,
     )
     x_base_path = output_dir / 'x_base_hr.png'
     assets['init_image'].save(x_base_path)
@@ -458,6 +470,12 @@ def main() -> int:
         tile_size=args.tile_size,
         tile_overlap=args.tile_overlap,
         mask_strategy=args.mask_strategy,
+        semantic_refine_prompts=args.semantic_refine_prompts,
+        semantic_protect_prompts=args.semantic_protect_prompts,
+        semantic_clip_model_path=args.semantic_clip_model_path,
+        semantic_clip_device=args.semantic_clip_device,
+        semantic_grid_size=args.semantic_grid_size,
+        semantic_batch_size=args.semantic_batch_size,
     )
 
     summary = {

@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip_text_weight", type=float, default=0.0)
     parser.add_argument("--clip_image_weight", type=float, default=0.0)
     parser.add_argument("--clip_score_device", default="cpu")
+    parser.add_argument("--semantic_refine_prompts", default=None)
+    parser.add_argument("--semantic_protect_prompts", default=None)
+    parser.add_argument("--semantic_clip_model_path", default="laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
+    parser.add_argument("--semantic_clip_device", default="cpu")
+    parser.add_argument("--semantic_grid_size", type=int, default=8)
+    parser.add_argument("--semantic_batch_size", type=int, default=16)
     parser.add_argument("--max_runs", type=int, default=None)
     return parser.parse_args()
 
@@ -118,6 +124,22 @@ def _run_config(args: argparse.Namespace, output_dir: Path, config: Dict[str, An
         "--device",
         args.device,
     ]
+    if args.semantic_refine_prompts is not None:
+        cmd.extend(["--semantic_refine_prompts", args.semantic_refine_prompts])
+    if args.semantic_protect_prompts is not None:
+        cmd.extend(["--semantic_protect_prompts", args.semantic_protect_prompts])
+    cmd.extend(
+        [
+            "--semantic_clip_model_path",
+            args.semantic_clip_model_path,
+            "--semantic_clip_device",
+            args.semantic_clip_device,
+            "--semantic_grid_size",
+            str(args.semantic_grid_size),
+            "--semantic_batch_size",
+            str(args.semantic_batch_size),
+        ]
+    )
     if args.run_meissonic:
         cmd.append("--run_meissonic")
     else:

@@ -9,6 +9,7 @@ from .controller import (
 )
 from .reranker import CandidateScore, ScoreWeights, score_candidates
 from .semantic_metrics import CLIPScorer, naturalness_proxy
+from .semantic_guidance import CLIPRegionPrior, SemanticPrior
 from .token_editor import MeissonicTokenEditor, TokenRefineResult
 from .token_masks import TokenMaskSet, build_initial_token_masks
 
@@ -16,9 +17,11 @@ __all__ = [
     "AgentPlan",
     "CandidateScore",
     "CLIPScorer",
+    "CLIPRegionPrior",
     "MeissonicTokenEditor",
     "MASK_STRATEGIES",
     "ScoreWeights",
+    "SemanticPrior",
     "TokenMaskSet",
     "TokenRefineResult",
     "build_initial_token_masks",
