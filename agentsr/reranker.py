@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -21,6 +21,8 @@ class CandidateScore:
     lr_grad_l1: float
     boundary_l1: float
     edit_penalty_l1: float
+    clip_text_similarity: Optional[float]
+    clip_image_similarity: Optional[float]
     total: float
     selected: bool = False
 
@@ -31,6 +33,8 @@ class ScoreWeights:
     lr_grad_l1: float = 0.25
     boundary_l1: float = 0.50
     edit_penalty_l1: float = 0.50
+    clip_text: float = 0.0
+    clip_image: float = 0.0
 
 
 def _rgb_float(image: Image.Image, size: Optional[Tuple[int, int]] = None) -> np.ndarray:
@@ -96,17 +100,23 @@ def score_candidate(
     masks: TokenMaskSet,
     seed: Optional[int],
     weights: ScoreWeights,
+    multimodal_metrics: Optional[Dict[str, Optional[float]]] = None,
 ) -> CandidateScore:
     lr = lr_l1(candidate, observation)
     grad = lr_grad_l1(candidate, observation)
     boundary = boundary_l1(candidate, previous, masks.active)
     protected = np.logical_or(masks.known, masks.commit)
     edit = edit_penalty_l1(candidate, previous, protected)
+    multimodal_metrics = multimodal_metrics or {}
+    clip_text = multimodal_metrics.get("clip_text_similarity")
+    clip_image = multimodal_metrics.get("clip_image_similarity")
     total = (
         weights.lr_l1 * lr
         + weights.lr_grad_l1 * grad
         + weights.boundary_l1 * boundary
         + weights.edit_penalty_l1 * edit
+        - weights.clip_text * float(clip_text if clip_text is not None else 0.0)
+        - weights.clip_image * float(clip_image if clip_image is not None else 0.0)
     )
     return CandidateScore(
         candidate_id=candidate_id,
@@ -115,6 +125,8 @@ def score_candidate(
         lr_grad_l1=grad,
         boundary_l1=boundary,
         edit_penalty_l1=edit,
+        clip_text_similarity=clip_text,
+        clip_image_similarity=clip_image,
         total=float(total),
     )
 
@@ -126,11 +138,15 @@ def score_candidates(
     masks: TokenMaskSet,
     seeds: Iterable[Optional[int]],
     weights: Optional[ScoreWeights] = None,
+    multimodal_metrics: Optional[Iterable[Optional[Dict[str, Optional[float]]]]] = None,
 ) -> Tuple[int, List[CandidateScore]]:
     weights = weights or ScoreWeights()
+    candidate_list = list(candidates)
+    seed_list = list(seeds)
+    metric_list = list(multimodal_metrics) if multimodal_metrics is not None else [None] * len(candidate_list)
     scores = [
-        score_candidate(i, image, previous, observation, masks, seed, weights)
-        for i, (image, seed) in enumerate(zip(candidates, seeds))
+        score_candidate(i, image, previous, observation, masks, seed, weights, metric)
+        for i, (image, seed, metric) in enumerate(zip(candidate_list, seed_list, metric_list))
     ]
     if not scores:
         raise ValueError("at least one candidate is required")

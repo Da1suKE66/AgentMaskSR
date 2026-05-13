@@ -37,6 +37,20 @@ class MeissonicTokenEditor:
     def device(self):
         return self.pipe._execution_device
 
+    @property
+    def mask_token_id(self) -> int:
+        return int(self.pipe.scheduler.config.mask_token_id)
+
+    @property
+    def codebook_size(self) -> int:
+        embedding = getattr(getattr(self.pipe.vqvae, "quantize", None), "embedding", None)
+        if embedding is not None and hasattr(embedding, "weight"):
+            return int(embedding.weight.shape[0])
+        value = getattr(self.pipe.vqvae.config, "num_vq_embeddings", None)
+        if value is not None:
+            return int(value)
+        raise AttributeError("could not infer VQ codebook size")
+
     def encode_image_tokens(self, image: Image.Image) -> np.ndarray:
         import torch
 
@@ -91,15 +105,17 @@ class MeissonicTokenEditor:
         active_mask = np.asarray(active_token_mask, dtype=bool)
         base_tokens = self.encode_image_tokens(image) if preserve_known_tokens else None
         mask_image = token_mask_to_pixel_mask(active_mask, image.size)
+        effective_steps = max(1, int(num_inference_steps))
+        effective_strength = max(float(strength), 1.0 / float(effective_steps))
         with torch.no_grad():
             result = self.pipe(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 image=image,
                 mask_image=mask_image,
-                strength=float(strength),
+                strength=effective_strength,
                 guidance_scale=float(guidance_scale),
-                num_inference_steps=int(num_inference_steps),
+                num_inference_steps=effective_steps,
                 generator=generator,
                 temperature=temperature,
                 output_type="latent",
@@ -116,6 +132,9 @@ class MeissonicTokenEditor:
                 raise ValueError(
                     f"active token mask shape {active_mask.shape} does not match generated tokens {generated.shape[-2:]}"
                 )
+            invalid = np.logical_or(generated == self.mask_token_id, generated < 0)
+            invalid = np.logical_or(invalid, generated >= self.codebook_size)
+            generated = np.where(invalid, base, generated)
             merged = np.where(active_mask, generated, base).astype(np.int64)
             tokens_np = merged[None, ...] if tokens_np.ndim == 3 else merged
         decoded = self.decode_tokens(tokens_np, image.size)

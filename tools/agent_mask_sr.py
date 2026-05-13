@@ -25,6 +25,7 @@ from agentsr.controller import (  # noqa: E402
     observation_consistency_project,
 )
 from agentsr.reranker import ScoreWeights, lr_grad_l1, lr_l1, score_candidates, write_scores  # noqa: E402
+from agentsr.semantic_metrics import CLIPScorer, naturalness_proxy  # noqa: E402
 from agentsr.token_editor import MeissonicTokenEditor, seed_for_candidate  # noqa: E402
 from agentsr.token_masks import (  # noqa: E402
     build_initial_token_masks,
@@ -80,6 +81,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--reject_lr_worse_ratio', type=float, default=0.50, help='Reject when this fraction of token cells get worse and LR L1 regresses.')
     parser.add_argument('--reject_active_lr_worse_ratio', type=float, default=0.50, help='Reject when this fraction of active token cells get locally worse and LR L1 regresses.')
     parser.add_argument('--disable_candidate_reject', action='store_true', help='Disable controller-level reject/rollback safety checks.')
+    parser.add_argument('--enable_clip_score', action='store_true', help='Compute optional CLIP text/image similarities for candidates.')
+    parser.add_argument('--clip_model_path', default='laion/CLIP-ViT-H-14-laion2B-s32B-b79K')
+    parser.add_argument('--clip_score_device', default='cpu')
+    parser.add_argument('--clip_text_weight', type=float, default=0.0, help='Subtract this weight times CLIP text similarity from candidate score.')
+    parser.add_argument('--clip_image_weight', type=float, default=0.0, help='Subtract this weight times CLIP image-reference similarity from candidate score.')
 
     parser.add_argument('--run_projection_ablation', action='store_true', help='Write LR projection as ablation only.')
     parser.add_argument('--skip_consistency_projection', action='store_true', help=argparse.SUPPRESS)
@@ -252,7 +258,10 @@ def run_token_rerank_sr(
         'assets': assets['paths'],
         'controller_diagnostics': assets['diagnostics'],
         'initial_token_masks': mask_metadata(masks),
-        'score_weights': ScoreWeights().__dict__,
+        'score_weights': ScoreWeights(
+            clip_text=args.clip_text_weight,
+            clip_image=args.clip_image_weight,
+        ).__dict__,
         'rounds': [],
     }
 
@@ -262,6 +271,9 @@ def run_token_rerank_sr(
 
     pipe = load_meissonic_pipeline(args.model_path, args.device, dtype=args.dtype)
     editor = MeissonicTokenEditor(pipe)
+    clip_scorer = None
+    if args.enable_clip_score:
+        clip_scorer = CLIPScorer(args.clip_model_path, device=args.clip_score_device)
     current_image = assets['init_image']
     z_base = editor.encode_image_tokens(current_image)
     z_current = z_base
@@ -288,6 +300,7 @@ def run_token_rerank_sr(
 
         candidates: List[Image.Image] = []
         candidate_tokens: List[Any] = []
+        candidate_multimodal: List[Dict[str, Any]] = []
         seeds: List[Optional[int]] = []
         for candidate_id in range(max(1, int(args.candidate_k))):
             seed = seed_for_candidate(args.seed, round_id, candidate_id)
@@ -306,10 +319,38 @@ def run_token_rerank_sr(
             result.image.save(candidate_path)
             candidates.append(result.image)
             candidate_tokens.append(result.tokens)
+            metrics = naturalness_proxy(result.image)
+            if clip_scorer is not None:
+                metrics.update(clip_scorer.score(result.image, prompt=plan.prompt, reference=current_image).to_dict())
+            candidate_multimodal.append(metrics)
             seeds.append(seed)
 
-        best_id, scores = score_candidates(candidates, current_image, input_image, masks, seeds)
-        write_scores(round_dir / 'candidate_scores.json', scores)
+        score_weights = ScoreWeights(
+            clip_text=args.clip_text_weight,
+            clip_image=args.clip_image_weight,
+        )
+        best_id, scores = score_candidates(
+            candidates,
+            current_image,
+            input_image,
+            masks,
+            seeds,
+            weights=score_weights,
+            multimodal_metrics=candidate_multimodal,
+        )
+        write_scores(round_dir / 'candidate_scores.json', scores, weights=score_weights)
+        with (round_dir / 'candidate_multimodal_metrics.json').open('w', encoding='utf-8') as handle:
+            json.dump(
+                {
+                    'enabled_clip_score': bool(args.enable_clip_score),
+                    'clip_model_path': args.clip_model_path if args.enable_clip_score else None,
+                    'metrics': candidate_multimodal,
+                },
+                handle,
+                indent=2,
+                ensure_ascii=False,
+            )
+            handle.write('\n')
 
         best_image = candidates[best_id]
         best_tokens = candidate_tokens[best_id]

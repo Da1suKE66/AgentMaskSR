@@ -519,3 +519,48 @@ Next:
 - Add candidate/metric sweep over mask_strategy, token_mask_threshold, strength, guidance, and candidate_k.
 - Add optional CLIP/VLM-style semantic scoring so evaluation is not only dB/LR error.
 - Investigate active-token acceptance: current Meissonic samples improve visual detail but locally worsen LR in all active tokens for this dog test.
+
+## 2026-05-13 Candidate Sweep and CLIP Metrics Checkpoint
+
+Status: completed.
+
+Implemented:
+
+- Added agentsr/semantic_metrics.py with optional CLIPScorer and deterministic naturalness proxies.
+- CandidateScore now records clip_text_similarity and clip_image_similarity when available.
+- ScoreWeights now exposes clip_text and clip_image weights; both default to 0, so CLIP is recorded but does not affect reranking unless explicitly requested.
+- tools/agent_mask_sr.py now supports --enable_clip_score, --clip_score_device, --clip_text_weight, and --clip_image_weight.
+- Each round writes candidate_multimodal_metrics.json beside candidate_scores.json.
+- Added tools/sweep_token_rerank.py to run reproducible parameter/candidate sweeps and aggregate run_summary.json files.
+- Fixed low-strength invalid token failures: MeissonicTokenEditor now enforces at least one effective sampling step and replaces mask/out-of-range token ids with base tokens before VQ decode.
+
+CLIP smoke:
+
+- Output: outputs/token_rerank_uncage_k2_clip_smoke_1024
+- Config: uncage, token_threshold 0.5, strength 0.25, guidance 5.0, candidate_k 2, CLIP on CPU.
+- Selected candidate: seed 67.
+- Candidate 0: LR L1 1.0285, CLIP text 0.2662, CLIP image 0.9906, total 5.3068.
+- Candidate 1: LR L1 1.0134, CLIP text 0.2689, CLIP image 0.9919, total 5.2818.
+- CLIP weights were zero, so selection remained LR/boundary driven; CLIP metrics are now available for analysis.
+
+Parameter sweep smoke:
+
+- Output: outputs/token_rerank_param_sweep_uncage_fixed
+- Config grid: uncage, token_threshold 0.5, strength 0.10/0.15, guidance 4.0/5.0, candidate_k 2, steps 8.
+- All four runs completed after the low-strength fix.
+- guidance 4.0 gave candidate LR L1 0.9649 and score 4.7801.
+- guidance 5.0 gave candidate LR L1 1.0158 and score 5.2198.
+- All runs were correctly rejected by active_lr_worse_ratio=1.0 and stable_active_ratio=0.0.
+
+Interpretation:
+
+- The candidate/rerank infrastructure is now usable for controlled sweeps.
+- The current dog sample still shows that Meissonic active-token edits locally worsen LR in all active tokens, even when global LR L1 stays below 1.1.
+- Lower guidance is slightly safer than guidance 5.0 on this sample.
+- strength 0.10 and 0.15 are equivalent with steps=8 because both result in one effective Meissonic sampling step; future sweeps should use more steps when testing strength sensitivity.
+
+Next:
+
+- Run broader sweeps over token_threshold 0.35/0.5, strength 0.15/0.25/0.35, guidance 3/4/5, and candidate_k 2/4.
+- Add an agent planner that consumes sweep/round metrics and proposes the next mask/parameter plan.
+- Start semantic acceptance checks using CLIP/image similarity first, then VLM/OCR/face analyzers when available.
