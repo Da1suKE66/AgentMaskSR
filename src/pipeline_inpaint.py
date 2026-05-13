@@ -301,10 +301,13 @@ class InpaintPipeline(DiffusionPipeline):
                 else:
                     model_input = latents
 
-                if height == 1024: #args.resolution == 1024:
-                    img_ids = _prepare_latent_image_ids(model_input.shape[0], model_input.shape[-2],model_input.shape[-1],model_input.device,model_input.dtype)
-                else:
-                    img_ids = _prepare_latent_image_ids(model_input.shape[0],2*model_input.shape[-2],2*model_input.shape[-1],model_input.device,model_input.dtype)
+                img_ids = _prepare_latent_image_ids(
+                    model_input.shape[0],
+                    model_input.shape[-2],
+                    model_input.shape[-1],
+                    model_input.device,
+                    model_input.dtype,
+                )
                 txt_ids = torch.zeros(encoder_hidden_states.shape[1],3).to(device = encoder_hidden_states.device, dtype = encoder_hidden_states.dtype)
                 model_output = self.transformer(
                     model_input,

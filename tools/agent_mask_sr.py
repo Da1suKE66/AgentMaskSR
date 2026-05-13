@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
 
@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agentsr.controller import (  # noqa: E402
+    AgentPlan,
     DEFAULT_NEGATIVE_PROMPT,
     MASK_STRATEGIES,
     build_refinement_assets,
@@ -47,7 +48,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--plan_json', default=None, help='Optional existing AgentPlan JSON.')
     parser.add_argument(
         '--mode',
-        choices=['sr', 'detail', 'outpaint', 'sr_outpaint', 'token_rerank_sr'],
+        choices=[
+            'sr',
+            'detail',
+            'outpaint',
+            'sr_outpaint',
+            'token_rerank_sr',
+            'progressive_token_rerank_sr',
+            'cascaded_token_rerank_sr',
+        ],
         default=None,
     )
     parser.add_argument('--target_resolution', default='1024x1024', help='WIDTHxHEIGHT target resolution.')
@@ -74,6 +83,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument('--rounds', type=int, default=2, help='Token-rerank refinement rounds.')
     parser.add_argument('--candidate_k', type=int, default=2, help='Candidates sampled per token-rerank round.')
+    parser.add_argument('--progressive_scale_factor', type=int, default=2, help='Scale factor per progressive SR stage.')
     parser.add_argument('--refine_strength', type=float, default=1.0, help='Meissonic inpaint strength for active tokens.')
     parser.add_argument('--token_vae_scale_factor', type=int, default=16, help='Dry-run token grid scale factor.')
     parser.add_argument('--token_mask_threshold', type=float, default=0.25, help='Pixel-mask occupancy required to activate a token cell.')
@@ -226,6 +236,50 @@ def _write_summary(path: Path, summary: Dict[str, Any]) -> None:
     with path.open('w', encoding='utf-8') as handle:
         json.dump(summary, handle, indent=2, ensure_ascii=False)
         handle.write('\n')
+
+
+def _clone_plan_for_stage(plan: AgentPlan, target_resolution: Tuple[int, int]) -> AgentPlan:
+    stage_plan = AgentPlan.from_mapping(plan.to_dict())
+    stage_plan.target_resolution = tuple(target_resolution)
+    stage_plan.mode = 'sr'
+    return stage_plan
+
+
+def _progressive_stage_sizes(
+    input_size: Tuple[int, int],
+    target_size: Tuple[int, int],
+    scale_factor: int,
+) -> List[Tuple[int, int]]:
+    scale = max(2, int(scale_factor))
+    current_w, current_h = int(input_size[0]), int(input_size[1])
+    target_w, target_h = int(target_size[0]), int(target_size[1])
+    stages: List[Tuple[int, int]] = []
+    while (current_w, current_h) != (target_w, target_h):
+        if current_w < target_w:
+            next_w = min(target_w, current_w * scale)
+        else:
+            next_w = target_w
+        if current_h < target_h:
+            next_h = min(target_h, current_h * scale)
+        else:
+            next_h = target_h
+        if (next_w, next_h) == (current_w, current_h):
+            break
+        stages.append((next_w, next_h))
+        current_w, current_h = next_w, next_h
+    if not stages:
+        stages.append((target_w, target_h))
+    return stages
+
+
+def _mask_after_rejected_candidate(masks: TokenMaskSet, next_masks: TokenMaskSet) -> TokenMaskSet:
+    proposed_new_commit = next_masks.commit & ~masks.commit
+    return TokenMaskSet(
+        known=masks.known,
+        active=next_masks.active | proposed_new_commit,
+        commit=masks.commit,
+        outpaint=masks.outpaint,
+    )
 
 
 def run_token_rerank_sr(
@@ -428,13 +482,7 @@ def run_token_rerank_sr(
             # Rejection means "do not commit these tokens", not "use bicubic as
             # the main result". Keep the generated image on the SR path while
             # remasking the proposed stable tokens for the next round.
-            proposed_new_commit = next_masks.commit & ~masks.commit
-            masks = TokenMaskSet(
-                known=masks.known,
-                active=next_masks.active | proposed_new_commit,
-                commit=masks.commit,
-                outpaint=masks.outpaint,
-            )
+            masks = _mask_after_rejected_candidate(masks, next_masks)
         else:
             masks = next_masks
 
@@ -453,6 +501,286 @@ def run_token_rerank_sr(
     return summary
 
 
+def run_progressive_token_rerank_sr(
+    args: argparse.Namespace,
+    input_image: Image.Image,
+    plan,
+    output_dir: Path,
+) -> Dict[str, Any]:
+    stage_sizes = _progressive_stage_sizes(
+        input_image.size,
+        plan.target_resolution,
+        scale_factor=args.progressive_scale_factor,
+    )
+    summary: Dict[str, Any] = {
+        'mode': 'progressive_token_rerank_sr',
+        'output_dir': str(output_dir),
+        'dry_run': bool(args.dry_run or not args.run_meissonic),
+        'run_meissonic': bool(args.run_meissonic),
+        'input_size': list(input_image.size),
+        'target_resolution': list(plan.target_resolution),
+        'progressive_scale_factor': int(args.progressive_scale_factor),
+        'stage_sizes': [list(size) for size in stage_sizes],
+        'score_reference': 'previous_stage_image',
+        'original_lr_reference': 'input_image',
+        'score_weights': ScoreWeights(
+            clip_text=args.clip_text_weight,
+            clip_image=args.clip_image_weight,
+        ).__dict__,
+        'stages': [],
+    }
+
+    pipe = None
+    editor = None
+    clip_scorer = None
+    if args.run_meissonic and not args.dry_run:
+        pipe = load_meissonic_pipeline(args.model_path, args.device, dtype=args.dtype)
+        editor = MeissonicTokenEditor(pipe)
+        if args.enable_clip_score:
+            clip_scorer = CLIPScorer(args.clip_model_path, device=args.clip_score_device)
+
+    current_stage_input = input_image.convert('RGB')
+    generated_candidate_used = False
+    final_token_masks = None
+
+    for stage_idx, stage_size in enumerate(stage_sizes, start=1):
+        stage_dir = output_dir / f'stage_{stage_idx:02d}_{stage_size[0]}x{stage_size[1]}'
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        stage_plan = _clone_plan_for_stage(plan, stage_size)
+        stage_plan.mask_policy = args.mask_strategy
+
+        assets = build_refinement_assets(
+            current_stage_input,
+            stage_plan,
+            stage_dir,
+            outpaint_margin_ratio=args.outpaint_margin_ratio,
+            tile_size=args.tile_size,
+            tile_overlap=args.tile_overlap,
+            mask_strategy=args.mask_strategy,
+            semantic_refine_prompts=args.semantic_refine_prompts,
+            semantic_protect_prompts=args.semantic_protect_prompts,
+            semantic_clip_model_path=args.semantic_clip_model_path,
+            semantic_clip_device=args.semantic_clip_device,
+            semantic_grid_size=args.semantic_grid_size,
+            semantic_batch_size=args.semantic_batch_size,
+        )
+        stage_base_path = stage_dir / 'x_base_stage.png'
+        assets['init_image'].save(stage_base_path)
+
+        masks = build_initial_token_masks(
+            assets['mask_image'],
+            stage_plan.target_resolution,
+            vae_scale_factor=args.token_vae_scale_factor,
+            token_threshold=args.token_mask_threshold,
+        )
+        round0_dir = stage_dir / 'round_00'
+        save_token_masks_npz(round0_dir / 'token_masks.npz', masks)
+        token_mask_to_pixel_mask(masks.active, stage_plan.target_resolution).save(round0_dir / 'active_token_mask.png')
+
+        stage_summary: Dict[str, Any] = {
+            'stage': stage_idx,
+            'input_size': list(current_stage_input.size),
+            'target_resolution': list(stage_plan.target_resolution),
+            'stage_input': str(stage_dir / 'stage_input.png'),
+            'x_base_stage': str(stage_base_path),
+            'assets': assets['paths'],
+            'controller_diagnostics': assets['diagnostics'],
+            'initial_token_masks': mask_metadata(masks),
+            'rounds': [],
+        }
+        current_stage_input.save(stage_dir / 'stage_input.png')
+
+        if args.dry_run or not args.run_meissonic:
+            stage_output = assets['init_image']
+            stage_output_path = stage_dir / 'stage_final.png'
+            stage_output.save(stage_output_path)
+            stage_summary['stage_final'] = str(stage_output_path)
+            stage_summary['stage_final_source'] = 'x_base_stage_dry_run'
+            stage_summary['stage_consistency_metrics'] = downsample_consistency_metrics(
+                stage_output,
+                current_stage_input,
+            )
+            stage_summary['original_lr_metrics'] = downsample_consistency_metrics(stage_output, input_image)
+            stage_summary['final_token_masks'] = mask_metadata(masks)
+            summary['stages'].append(stage_summary)
+            current_stage_input = stage_output
+            final_token_masks = masks
+            continue
+
+        assert editor is not None
+        current_image = assets['init_image']
+        z_base = editor.encode_image_tokens(current_image)
+        z_current = z_base
+        actual_shape = tuple(z_base.shape[-2:])
+        if actual_shape != masks.shape:
+            masks = build_initial_token_masks(
+                assets['mask_image'],
+                stage_plan.target_resolution,
+                vae_scale_factor=editor.vae_scale_factor,
+                token_threshold=args.token_mask_threshold,
+            )
+            stage_summary['initial_token_masks'] = mask_metadata(masks)
+
+        for round_id in range(max(0, int(args.rounds))):
+            if not bool(masks.active.any()):
+                stage_summary['rounds'].append({'round': round_id + 1, 'stopped': 'no_active_tokens'})
+                break
+
+            round_dir = stage_dir / f'round_{round_id + 1:02d}'
+            round_dir.mkdir(parents=True, exist_ok=True)
+            save_token_masks_npz(round_dir / 'token_masks.npz', masks, z_base=z_base, z_current=z_current)
+            token_mask_to_pixel_mask(masks.active, current_image.size).save(round_dir / 'active_token_mask.png')
+
+            candidates: List[Image.Image] = []
+            candidate_tokens: List[Any] = []
+            candidate_multimodal: List[Dict[str, Any]] = []
+            seeds: List[Optional[int]] = []
+            for candidate_id in range(max(1, int(args.candidate_k))):
+                seed = seed_for_candidate(args.seed, stage_idx * 100 + round_id, candidate_id)
+                result = editor.refine(
+                    current_image,
+                    masks.active,
+                    prompt=stage_plan.prompt,
+                    negative_prompt=args.negative_prompt,
+                    num_inference_steps=args.steps,
+                    guidance_scale=args.guidance_scale,
+                    temperature=(max(0.01, stage_plan.temperature), 0.0),
+                    strength=args.refine_strength,
+                    seed=seed,
+                )
+                candidate_path = round_dir / f'candidate_{candidate_id:02d}.png'
+                result.image.save(candidate_path)
+                candidates.append(result.image)
+                candidate_tokens.append(result.tokens)
+                metrics = naturalness_proxy(result.image)
+                if clip_scorer is not None:
+                    metrics.update(clip_scorer.score(result.image, prompt=stage_plan.prompt, reference=current_image).to_dict())
+                candidate_multimodal.append(metrics)
+                seeds.append(seed)
+
+            score_weights = ScoreWeights(
+                clip_text=args.clip_text_weight,
+                clip_image=args.clip_image_weight,
+            )
+            best_id, scores = score_candidates(
+                candidates,
+                current_image,
+                current_stage_input,
+                masks,
+                seeds,
+                weights=score_weights,
+                multimodal_metrics=candidate_multimodal,
+            )
+            write_scores(round_dir / 'candidate_scores.json', scores, weights=score_weights)
+            with (round_dir / 'candidate_multimodal_metrics.json').open('w', encoding='utf-8') as handle:
+                json.dump(
+                    {
+                        'enabled_clip_score': bool(args.enable_clip_score),
+                        'clip_model_path': args.clip_model_path if args.enable_clip_score else None,
+                        'metrics': candidate_multimodal,
+                    },
+                    handle,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                handle.write('\n')
+
+            best_image = candidates[best_id]
+            best_tokens = candidate_tokens[best_id]
+            current_ref_l1 = lr_l1(current_image, current_stage_input)
+            current_ref_grad_l1 = lr_grad_l1(current_image, current_stage_input)
+            current_original_l1 = lr_l1(current_image, input_image)
+            next_masks, mask_update = update_masks_after_round(
+                masks,
+                previous_image=current_image,
+                best_image=best_image,
+                observation=current_stage_input,
+                candidate_tokens=candidate_tokens,
+                best_tokens=best_tokens,
+                lr_worse_margin=args.lr_worse_margin,
+            )
+
+            best_score = scores[best_id]
+            rejected = False
+            reject_reason = None
+            if not args.disable_candidate_reject:
+                ref_regression = best_score.lr_l1 - current_ref_l1
+                if ref_regression > args.reject_lr_l1_margin:
+                    rejected = True
+                    reject_reason = f'stage_ref_l1_regression:{ref_regression:.6f}>{args.reject_lr_l1_margin:.6f}'
+                elif mask_update['lr_worse_ratio'] > args.reject_lr_worse_ratio and best_score.lr_l1 > current_ref_l1:
+                    rejected = True
+                    reject_reason = (
+                        f'stage_ref_worse_ratio:{mask_update["lr_worse_ratio"]:.6f}'
+                        f'>{args.reject_lr_worse_ratio:.6f}'
+                    )
+                elif (
+                    mask_update.get('active_lr_worse_ratio', 0.0) > args.reject_active_lr_worse_ratio
+                    and best_score.lr_l1 > current_ref_l1
+                ):
+                    rejected = True
+                    reject_reason = (
+                        f'active_stage_ref_worse_ratio:{mask_update["active_lr_worse_ratio"]:.6f}'
+                        f'>{args.reject_active_lr_worse_ratio:.6f}'
+                    )
+
+            round_summary = {
+                'round': round_id + 1,
+                'best_candidate': int(best_id),
+                'best_seed': seeds[best_id],
+                'best_score': best_score.total,
+                'current_stage_ref_l1': current_ref_l1,
+                'current_stage_ref_grad_l1': current_ref_grad_l1,
+                'candidate_stage_ref_l1': best_score.lr_l1,
+                'candidate_stage_ref_grad_l1': best_score.lr_grad_l1,
+                'current_original_lr_l1': current_original_l1,
+                'candidate_original_lr_l1': lr_l1(best_image, input_image),
+                'accepted': not rejected,
+                'reject_reason': reject_reason,
+                'used_as_current': True,
+                'committed': not rejected,
+                'mask_update': mask_update,
+            }
+            stage_summary['rounds'].append(round_summary)
+
+            current_image = best_image
+            z_current = best_tokens
+            generated_candidate_used = True
+            if rejected:
+                masks = _mask_after_rejected_candidate(masks, next_masks)
+            else:
+                masks = next_masks
+
+        stage_output_path = stage_dir / 'stage_final.png'
+        current_image.save(stage_output_path)
+        stage_summary['stage_final'] = str(stage_output_path)
+        stage_summary['stage_final_source'] = 'best_generated_candidate'
+        stage_summary['stage_consistency_metrics'] = downsample_consistency_metrics(current_image, current_stage_input)
+        stage_summary['original_lr_metrics'] = downsample_consistency_metrics(current_image, input_image)
+        stage_summary['final_token_masks'] = mask_metadata(masks)
+        summary['stages'].append(stage_summary)
+        current_stage_input = current_image
+        final_token_masks = masks
+
+    final_path = output_dir / 'final_hr.png'
+    current_stage_input.save(final_path)
+    summary['final_hr'] = str(final_path)
+    summary['final_source'] = 'best_generated_candidate' if generated_candidate_used else 'x_base_stage_no_candidate'
+    summary['final_metrics'] = downsample_consistency_metrics(current_stage_input, input_image)
+    if final_token_masks is not None:
+        summary['final_token_masks'] = mask_metadata(final_token_masks)
+
+    if args.run_projection_ablation and not args.skip_consistency_projection:
+        last_assets = summary['stages'][-1]['assets'] if summary.get('stages') else {}
+        summary['projection_ablation_skipped'] = {
+            'reason': 'progressive mode keeps projection disabled; run single-stage ablation for projection outputs',
+            'last_stage_assets': last_assets,
+        }
+
+    _write_summary(output_dir / 'run_summary.json', summary)
+    return summary
+
+
 def main() -> int:
     args = parse_args()
     output_dir = ensure_repo_local(Path(args.output_dir))
@@ -460,7 +788,8 @@ def main() -> int:
 
     input_image = Image.open(args.input_image).convert('RGB')
     requested_mode = args.mode
-    controller_mode = 'sr' if requested_mode == 'token_rerank_sr' else requested_mode
+    token_modes = {'token_rerank_sr', 'progressive_token_rerank_sr', 'cascaded_token_rerank_sr'}
+    controller_mode = 'sr' if requested_mode in token_modes else requested_mode
     if args.plan_json:
         plan = load_plan(Path(args.plan_json))
     else:
@@ -475,6 +804,10 @@ def main() -> int:
 
     if requested_mode == 'token_rerank_sr':
         summary = run_token_rerank_sr(args, input_image, plan, output_dir)
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return 0
+    if requested_mode in {'progressive_token_rerank_sr', 'cascaded_token_rerank_sr'}:
+        summary = run_progressive_token_rerank_sr(args, input_image, plan, output_dir)
         print(json.dumps(summary, indent=2, ensure_ascii=False))
         return 0
 

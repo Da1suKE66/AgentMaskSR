@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input_image", required=True)
     parser.add_argument("--output_dir", default="outputs/token_rerank_sweep")
     parser.add_argument("--prompt", default="faithful super-resolution")
+    parser.add_argument(
+        "--mode",
+        default="token_rerank_sr",
+        choices=["token_rerank_sr", "progressive_token_rerank_sr", "cascaded_token_rerank_sr"],
+    )
     parser.add_argument("--target_resolution", default="1024x1024")
     parser.add_argument("--strategies", default="uncage")
     parser.add_argument("--token_thresholds", default="0.5")
@@ -86,7 +91,7 @@ def _iter_configs(args: argparse.Namespace) -> Iterable[Dict[str, Any]]:
 
 def _run_config(args: argparse.Namespace, output_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     run_name = (
-        f"{config['strategy']}_tok{config['token_threshold']:.2f}_"
+        f"{args.mode}_{config['strategy']}_tok{config['token_threshold']:.2f}_"
         f"str{config['strength']:.2f}_gs{config['guidance_scale']:.1f}_k{config['candidate_k']}"
     ).replace(".", "p")
     run_dir = output_dir / run_name
@@ -100,7 +105,7 @@ def _run_config(args: argparse.Namespace, output_dir: Path, config: Dict[str, An
         "--prompt",
         args.prompt,
         "--mode",
-        "token_rerank_sr",
+        args.mode,
         "--target_resolution",
         args.target_resolution,
         "--mask_strategy",
@@ -169,19 +174,42 @@ def _run_config(args: argparse.Namespace, output_dir: Path, config: Dict[str, An
     if summary_path.exists():
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         result["summary_path"] = str(summary_path)
-        result["initial_token_masks"] = summary.get("initial_token_masks")
+        if args.mode in {"progressive_token_rerank_sr", "cascaded_token_rerank_sr"}:
+            stages = summary.get("stages") or []
+            last_stage = stages[-1] if stages else {}
+            result["stages"] = [
+                {
+                    "stage": stage.get("stage"),
+                    "target_resolution": stage.get("target_resolution"),
+                    "initial_token_masks": stage.get("initial_token_masks"),
+                    "stage_final_source": stage.get("stage_final_source"),
+                    "stage_consistency_metrics": stage.get("stage_consistency_metrics"),
+                    "original_lr_metrics": stage.get("original_lr_metrics"),
+                }
+                for stage in stages
+            ]
+            result["initial_token_masks"] = last_stage.get("initial_token_masks")
+            rounds = last_stage.get("rounds") or []
+            score_dir = Path(last_stage.get("stage_final", run_dir)).parent
+        else:
+            result["initial_token_masks"] = summary.get("initial_token_masks")
+            rounds = summary.get("rounds") or []
+            score_dir = run_dir
         result["final_metrics"] = summary.get("final_metrics")
-        rounds = summary.get("rounds") or []
         if rounds:
             last_round = rounds[-1]
             result["accepted"] = last_round.get("accepted")
             result["reject_reason"] = last_round.get("reject_reason")
             result["best_candidate"] = last_round.get("best_candidate")
             result["best_score"] = last_round.get("best_score")
-            result["candidate_lr_l1"] = last_round.get("candidate_lr_l1")
-            result["candidate_lr_grad_l1"] = last_round.get("candidate_lr_grad_l1")
+            result["candidate_lr_l1"] = last_round.get("candidate_lr_l1", last_round.get("candidate_stage_ref_l1"))
+            result["candidate_lr_grad_l1"] = last_round.get(
+                "candidate_lr_grad_l1",
+                last_round.get("candidate_stage_ref_grad_l1"),
+            )
+            result["candidate_original_lr_l1"] = last_round.get("candidate_original_lr_l1")
             result["mask_update"] = last_round.get("mask_update")
-            score_path = run_dir / f"round_{int(last_round.get('round', 1)):02d}" / "candidate_scores.json"
+            score_path = score_dir / f"round_{int(last_round.get('round', 1)):02d}" / "candidate_scores.json"
             if score_path.exists():
                 score_payload = json.loads(score_path.read_text(encoding="utf-8"))
                 selected = next(
@@ -251,6 +279,7 @@ def main() -> int:
     payload = {
         "input_image": args.input_image,
         "output_dir": str(output_dir),
+        "mode": args.mode,
         "run_meissonic": bool(args.run_meissonic),
         "enable_clip_score": bool(args.enable_clip_score),
         "results": results,
