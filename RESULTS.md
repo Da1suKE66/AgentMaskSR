@@ -649,3 +649,42 @@ Next:
 - Add a same-budget semantic token selector: start from uncage token candidates, then swap tokens by semantic refine/protect score without increasing active token count.
 - Add semantic protect hard-freeze masks for eyes/nose/text/object boundary before active token selection.
 - Evaluate semantic guidance with matched active token counts, not only matched pixel mask budget.
+
+## 2026-05-13 Final Output Semantics Fix
+
+Status: completed.
+
+Problem:
+
+- token_rerank_sr wrote rejected candidates to round_*/candidate_*.png but skipped updating current_image before the next loop.
+- As a result, final_hr.png could equal x_base_hr.png whenever the best generated candidate failed the strict accept/commit gate.
+- That is wrong for the main method: x_base_hr is a deterministic baseline/ablation, not the main final result.
+
+Fix:
+
+- Rejection now means "do not commit these tokens", not "rollback final output to bicubic".
+- The best generated candidate is always used as the current SR image and can become final_hr.png.
+- If a candidate is rejected, proposed new commits are not kept; those token positions remain active/remasked for the next round.
+- run_summary.json now records:
+  - final_source
+  - used_as_current
+  - committed
+
+Verification run:
+
+- Output: outputs/semantic_uncage_reweight_th0.65_k2_smoke_1024_finalfix
+- final_source: best_generated_candidate
+- x_base_hr hash: e57e58d9fa58
+- final_hr hash: e672fef431d1
+- final_hr equals selected candidate_01.
+- final vs base mean absolute RGB difference: [0.5030, 0.4586, 0.4370]
+- The selected candidate is still marked rejected for consistency:
+  - reject_reason: active_lr_worse_ratio:1.000000>0.500000
+  - committed: false
+  - active tokens remain 71 for remasking.
+
+Interpretation:
+
+- The pipeline now separates generation output from consistency acceptance.
+- final_hr.png is the Meissonic-generated SR branch.
+- x_base_hr.png remains available only as baseline/ablation and as the deterministic starting observation.

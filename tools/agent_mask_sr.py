@@ -28,6 +28,7 @@ from agentsr.reranker import ScoreWeights, lr_grad_l1, lr_l1, score_candidates, 
 from agentsr.semantic_metrics import CLIPScorer, naturalness_proxy  # noqa: E402
 from agentsr.token_editor import MeissonicTokenEditor, seed_for_candidate  # noqa: E402
 from agentsr.token_masks import (  # noqa: E402
+    TokenMaskSet,
     build_initial_token_masks,
     mask_metadata,
     save_token_masks_npz,
@@ -289,6 +290,7 @@ def run_token_rerank_sr(
     current_image = assets['init_image']
     z_base = editor.encode_image_tokens(current_image)
     z_current = z_base
+    generated_candidate_used = False
 
     actual_shape = tuple(z_base.shape[-2:])
     if actual_shape != masks.shape:
@@ -413,20 +415,34 @@ def run_token_rerank_sr(
             'candidate_lr_grad_l1': best_score.lr_grad_l1,
             'accepted': not rejected,
             'reject_reason': reject_reason,
+            'used_as_current': True,
+            'committed': not rejected,
             'mask_update': mask_update,
         }
         summary['rounds'].append(round_summary)
-        if rejected:
-            continue
 
         current_image = best_image
         z_current = best_tokens
-        masks = next_masks
+        generated_candidate_used = True
+        if rejected:
+            # Rejection means "do not commit these tokens", not "use bicubic as
+            # the main result". Keep the generated image on the SR path while
+            # remasking the proposed stable tokens for the next round.
+            proposed_new_commit = next_masks.commit & ~masks.commit
+            masks = TokenMaskSet(
+                known=masks.known,
+                active=next_masks.active | proposed_new_commit,
+                commit=masks.commit,
+                outpaint=masks.outpaint,
+            )
+        else:
+            masks = next_masks
 
     final_path = output_dir / 'final_hr.png'
     current_image.save(final_path)
     final_metrics = downsample_consistency_metrics(current_image, input_image)
     summary['final_hr'] = str(final_path)
+    summary['final_source'] = 'best_generated_candidate' if generated_candidate_used else 'x_base_hr_no_candidate'
     summary['final_metrics'] = final_metrics
     summary['final_token_masks'] = mask_metadata(masks)
 
